@@ -17,12 +17,17 @@
 #     --logging.folder=./log_test \
 #     --logging.log_level=2
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8
-python train_imagenet.py --config-file configs/mvit_100cls.yaml
-python train_imagenet.py --config-file configs/mvit_1000cls.yaml
-python train_imagenet.py --config-file configs/vit_100cls.yaml
-python train_imagenet.py --config-file configs/vit_1000cls.yaml
+# export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8
+# python train_imagenet.py --config-file configs/mvit_100cls.yaml
+# python train_imagenet.py --config-file configs/mvit_1000cls.yaml
+# python train_imagenet.py --config-file configs/vit_100cls.yaml
+# python train_imagenet.py --config-file configs/vit_1000cls.yaml
 
 # export IMAGENET_DIR='/datasets01/imagenet_full_size/061417'
 # export WRITE_DIR='/data/home/pingchiang/data/imagenet_ffcv'
 # bash write_imagenet.sh 500 0.50 90
+
+bash slurm_train.sh a100 imgnt --config-file configs/mvit_100cls.yaml &> logs/mvit100.log &
+bash slurm_train.sh a100 imgnt --config-file configs/mvit_1000cls.yaml &> logs/mvit1000.log &
+bash slurm_train.sh a100 imgnt --config-file configs/vit_100cls.yaml &> logs/vit100.log &
+bash slurm_train.sh a100 imgnt --config-file configs/vit_1000cls.yaml &> logs/vit1000.log &
