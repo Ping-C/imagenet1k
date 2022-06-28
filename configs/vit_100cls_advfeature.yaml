@@ -7,14 +7,14 @@ data:
 dist:
   world_size: 8
 logging:
-  folder: ./outputs/mvit_imagenet100
+  folder: ./outputs/vit_imagenet100_advl4
   log_level: 2
 lr:
   lr: 0.001
   lr_schedule_type: cyclic_warm
   warmup_epochs: 9
 model:
-  arch: mvit
+  arch: vit_t
 resolution:
   end_ramp: 13
   max_res: 224
@@ -32,6 +32,12 @@ training:
   weight_decay: 0.0001
   use_blurpool: 1
   mixup: True
+adv:
+  num_steps: 1
+  radius_input: 0.0
+  step_size_input: 0.00
+  adv_features: '{"0": {"radius": 0.01, "step_size": 0.01}}'
+  adv_loss_weight: 0.5
 validation:
   batch_size: 64
   lr_tta: true

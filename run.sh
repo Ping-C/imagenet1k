@@ -27,7 +27,21 @@
 # export WRITE_DIR='/data/home/pingchiang/data/imagenet_ffcv'
 # bash write_imagenet.sh 500 0.50 90
 
-bash slurm_train.sh a100 imgnt --config-file configs/mvit_100cls.yaml &> logs/mvit100.log &
-bash slurm_train.sh a100 imgnt --config-file configs/mvit_1000cls.yaml &> logs/mvit1000.log &
-bash slurm_train.sh a100 imgnt --config-file configs/vit_100cls.yaml &> logs/vit100.log &
-bash slurm_train.sh a100 imgnt --config-file configs/vit_1000cls.yaml &> logs/vit1000.log &
+# bash slurm_train.sh a100 imgnt --config-file configs/mvit_100cls.yaml &> logs/mvit100.log &
+# bash slurm_train.sh a100 imgnt --config-file configs/mvit_1000cls.yaml &> logs/mvit1000.log &
+# bash slurm_train.sh a100 imgnt --config-file configs/vit_100cls.yaml &> logs/vit100.log &
+# bash slurm_train.sh a100 imgnt --config-file configs/vit_1000cls.yaml &> logs/vit1000.log &
+
+for r in 0.001 0.002 0.005 0.01 0.02 0.05 0.1
+do
+bash slurm_train.sh a100 imgnt --config-file configs/vit_100cls_advinput.yaml --adv.radius_input=$r --adv.step_size_input=$r --logging.folder=./outputs/vit_imagenet100_advinput$r &> logs/vit100_advinput${r}.log &
+done
+
+for r in 0.001 0.002 0.005 0.01 0.02 0.05
+do
+for l in 0 1 2 3 4 5
+do
+adv_features='{"'"$l"'":{"radius":'"$r"',"step_size":'"$r"'}}'
+bash slurm_train.sh a100 imgnt --config-file configs/vit_100cls_advfeature.yaml --adv.adv_features=$adv_features --logging.folder=./outputs/vit_imagenet100_advl${l}-${r}  &> logs/vit100_advl${l}-${r}.log &
+done
+done

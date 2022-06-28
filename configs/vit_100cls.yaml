@@ -7,7 +7,7 @@ data:
 dist:
   world_size: 8
 logging:
-  folder: ./vit_imagenet100
+  folder: ./outputs/vit_imagenet100
   log_level: 2
 lr:
   lr: 0.001

@@ -25,6 +25,15 @@ from fastargs import get_current_config
 from fastargs.decorators import param
 from fastargs import Param, Section
 from fastargs.validation import And, OneOf
+from fastargs.validation import Checker
+import json
+class DictChecker(Checker):
+    def check(self, value):
+        return json.loads(value)
+
+    def help(self):
+        return "a dictionary"
+
 
 from ffcv.pipeline.operation import Operation
 from ffcv.loader import Loader, OrderOption
@@ -88,6 +97,14 @@ Section('training', 'training hyper param stuff').params(
     use_blurpool=Param(int, 'use blurpool?', default=0)
 )
 
+Section('adv', 'hyper parameter related to adversarial training').params(
+    num_steps=Param(int, 'number of adversarial steps'),
+    radius_input=Param(float, 'adversarial radius'),
+    step_size_input=Param(float, 'step size for adversarial step'),
+    adv_features=Param(DictChecker(), 'attacked feature layers'),
+    adv_loss_weight=Param(float, 'weight assigned to adversarial loss')
+)
+
 Section('dist', 'distributed training options').params(
     world_size=Param(int, 'number gpus', default=1),
     address=Param(str, 'address', default='localhost'),
@@ -98,6 +115,22 @@ IMAGENET_MEAN = np.array([0.485, 0.456, 0.406]) * 255
 IMAGENET_STD = np.array([0.229, 0.224, 0.225]) * 255
 DEFAULT_CROP_RATIO = 224/256
 
+# from collections.abc import MutableMapping
+class FeatureNoise(object):
+    def __init__(self, noise):
+        self.noise = noise
+    def __getitem__(self, key):
+        return self.noise[key]
+    def __setitem__(self, key, value):
+        self.noise[key] = value
+    def __delitem__(self, key):
+        del self.noise[key]
+    def __iter__(self):
+        return iter(self.noise)
+    def __len__(self):
+        return len(self.noise)
+    def __contains__(self, key):
+        return key in self.noise
 @param('lr.lr')
 @param('lr.step_ratio')
 @param('lr.step_length')
@@ -401,16 +434,48 @@ class ImageNetTrainer:
 
         return model, scaler
     
-    def adv_step(self, model, images, attack_kwargs):
-        # return attacked images, and intermediate representations
-        return 0,0
+
+    @param('adv.num_steps')
+    @param('adv.radius_input')
+    @param('adv.step_size_input')
+    @param('adv.adv_features')
+    def adv_step(self, model, images, target,
+        num_steps=None, step_size_input=None, radius_input=None, adv_features=None):
+        input_adv_noise = ch.zeros_like(images, requires_grad=True)
+        feature_adv_noise = FeatureNoise({int(layer): None for layer in adv_features} if adv_features is not None else {})
+        for step in range(num_steps):
+            with autocast():
+                output = self.model(images+input_adv_noise, feature_noise=feature_adv_noise)
+                loss_adv = self.train_loss_func(output, target)
+                all_step_sizes = [step_size_input]
+                all_radii = [radius_input]
+                all_noises = [input_adv_noise] 
+                if adv_features is not None:
+                    for k in adv_features:
+                        all_noises.append(feature_adv_noise[int(k)])
+                        all_step_sizes.append(adv_features[k]['step_size'])
+                        all_radii.append(adv_features[k]['radius'])
+                all_grad = ch.autograd.grad(loss_adv, all_noises)
+                # apply perturbations to each individual features
+                for noise, grad, step_size, radius in zip(all_noises, all_grad, all_step_sizes, all_radii):
+                    # normalize gradients to unit norm & times the radius
+                    # grad /= (grad.norm(dim=ch.arange(1, len(grad.shape)).tolist(), keepdim=True, p=2) + 1e-5)
+                    noise.data += grad.sign() * step_size
+                    noise.data.clamp_(-radius, +radius)
+        for k in feature_adv_noise:
+            feature_adv_noise[k] = feature_adv_noise[k].detach()
+        
+        return input_adv_noise.detach(), feature_adv_noise
 
     @param('logging.log_level')
     @param('training.grad_clip_norm')
-    def train_loop(self, epoch, log_level, grad_clip_norm):
+    @param('adv.num_steps')
+    @param('adv.adv_loss_weight')
+    def train_loop(self, epoch, log_level, grad_clip_norm, num_steps, adv_loss_weight):
         model = self.model
         model.train()
         losses = []
+        adv = num_steps > 0
 
         lr_start, lr_end = self.get_lr(epoch), self.get_lr(epoch + 1)
         iters = len(self.train_loader)
@@ -422,13 +487,18 @@ class ImageNetTrainer:
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = lrs[ix]
             self.optimizer.zero_grad(set_to_none=True)
+
             # generate adversarial examples/intermediate adversarial examples
-            attack_kwargs = {}
-            images_adv, features_adv = self.adv_step(self.model, images, attack_kwargs)
+            if adv:
+                images_adv, features_adv = self.adv_step(self.model, images, target)
 
             with autocast():
                 output = self.model(images)
                 loss_train = self.train_loss_func(output, target)
+                if adv:
+                    output_adv = self.model(images+images_adv, feature_noise=features_adv)
+                    loss_train_adv = self.train_loss_func(output_adv, target)
+                    loss_train = loss_train_adv * adv_loss_weight + loss_train * (1-adv_loss_weight)
 
             self.scaler.scale(loss_train).backward()
             # Unscales the gradients of optimizer's assigned params in-place

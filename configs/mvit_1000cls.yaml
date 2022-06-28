@@ -7,7 +7,7 @@ data:
 dist:
   world_size: 8
 logging:
-  folder: ./mvit_imagenet1000
+  folder: ./outputs/mvit_imagenet1000
   log_level: 2
 lr:
   lr: 0.001
