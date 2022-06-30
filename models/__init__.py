@@ -14,6 +14,36 @@ def get_arch(arch_name, num_classes):
             heads = 16,
             mlp_dim = 2048
         )
+    elif arch_name == 'vit_s':
+        return SimpleViT(
+            image_size = 224,
+            patch_size = 16,
+            num_classes = num_classes,
+            dim = 384,
+            depth = 12,
+            heads = 6,
+            mlp_dim = 768
+        )
+    elif arch_name == 'vit_m':
+        return SimpleViT(
+            image_size = 224,
+            patch_size = 16,
+            num_classes = num_classes,
+            dim = 512,
+            depth = 12,
+            heads = 8,
+            mlp_dim = 2048
+        )
+    elif arch_name == 'vit_b':
+        return SimpleViT(
+            image_size = 224,
+            patch_size = 16,
+            num_classes = num_classes,
+            dim = 768,
+            depth = 12,
+            heads = 12,
+            mlp_dim = 3072
+        )
     if arch_name == 'mvit':
         cfg = get_cfg()
         cfg.merge_from_list(

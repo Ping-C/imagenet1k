@@ -86,7 +86,7 @@ Section('validation', 'Validation parameters stuff').params(
 Section('training', 'training hyper param stuff').params(
     eval_only=Param(int, 'eval only?', default=0),
     batch_size=Param(int, 'The batch size', default=512),
-    optimizer=Param(And(str, OneOf(['sgd', 'adam'])), 'The optimizer', default='sgd'),
+    optimizer=Param(And(str, OneOf(['sgd', 'adam', 'adamw'])), 'The optimizer', default='sgd'),
     momentum=Param(float, 'SGD momentum', default=0.9),
     weight_decay=Param(float, 'weight decay', default=4e-5),
     grad_clip_norm=Param(float, 'gradient clipping threshold', default=None),
@@ -103,6 +103,9 @@ Section('adv', 'hyper parameter related to adversarial training').params(
     step_size_input=Param(float, 'step size for adversarial step'),
     adv_features=Param(DictChecker(), 'attacked feature layers'),
     adv_loss_weight=Param(float, 'weight assigned to adversarial loss')
+)
+Section('sam', 'hyper parameter related to sam training').params(
+    radius=Param(float, 'adversarial radius'),
 )
 
 Section('dist', 'distributed training options').params(
@@ -273,6 +276,18 @@ class ImageNetTrainer:
             }]
 
             self.optimizer = ch.optim.Adam(param_groups, lr=1)
+        elif optimizer == 'adamw':
+            all_params = list(self.model.named_parameters())
+            bn_params = [v for k, v in all_params if ('bn' in k)]
+            other_params = [v for k, v in all_params if not ('bn' in k)]
+            param_groups = [{
+                'params': bn_params,
+                'weight_decay': 0.
+            }, {
+                'params': other_params,
+                'weight_decay': weight_decay
+            }]
+            self.optimizer = ch.optim.AdamW(param_groups, lr=1)
         else:
             raise ValueError(f"unsupported optimizer: {optimizer}")
         if mixup:
@@ -471,11 +486,13 @@ class ImageNetTrainer:
     @param('training.grad_clip_norm')
     @param('adv.num_steps')
     @param('adv.adv_loss_weight')
-    def train_loop(self, epoch, log_level, grad_clip_norm, num_steps, adv_loss_weight):
+    @param('sam.radius')
+    def train_loop(self, epoch, log_level, grad_clip_norm, num_steps=0, adv_loss_weight=0, radius=0):
         model = self.model
         model.train()
         losses = []
         adv = num_steps > 0
+        sam = radius > 0
 
         lr_start, lr_end = self.get_lr(epoch), self.get_lr(epoch + 1)
         iters = len(self.train_loader)
@@ -493,6 +510,21 @@ class ImageNetTrainer:
                 images_adv, features_adv = self.adv_step(self.model, images, target)
 
             with autocast():
+                if sam:
+                    with self.model.no_sync():
+                        output = self.model(images)
+                        loss_train = self.train_loss_func(output, target)
+                        loss_train.backward()
+                        #calculate norm of grad
+                        norm = 0
+                        for para in self.model.parameters():
+                            norm += (para.grad**2).sum()
+                        norm = norm**0.5
+                        for para in self.model.parameters():
+                            para.pert = para.grad/norm*radius
+                            para.data += para.pert
+                            para.grad = None
+                            
                 output = self.model(images)
                 loss_train = self.train_loss_func(output, target)
                 if adv:
@@ -509,6 +541,10 @@ class ImageNetTrainer:
 
             self.scaler.step(self.optimizer)
             self.scaler.update()
+            if sam:
+                for i, para in enumerate(self.model.parameters()):
+                    para.data -= para.pert
+                
             ### Training end
 
             ### Logging start
@@ -528,6 +564,7 @@ class ImageNetTrainer:
                 msg = ', '.join(f'{n}={v}' for n, v in zip(names, values))
                 iterator.set_description(msg)
             ### Logging end
+        return (sum(losses)/len(losses)).item()
 
     @param('validation.lr_tta')
     def val_loop(self, lr_tta):

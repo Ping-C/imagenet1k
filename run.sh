@@ -18,7 +18,7 @@
 #     --logging.log_level=2
 
 # export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8
-# python train_imagenet.py --config-file configs/mvit_100cls.yaml
+# g
 # python train_imagenet.py --config-file configs/mvit_1000cls.yaml
 # python train_imagenet.py --config-file configs/vit_100cls.yaml
 # python train_imagenet.py --config-file configs/vit_1000cls.yaml
@@ -32,16 +32,34 @@
 # bash slurm_train.sh a100 imgnt --config-file configs/vit_100cls.yaml &> logs/vit100.log &
 # bash slurm_train.sh a100 imgnt --config-file configs/vit_1000cls.yaml &> logs/vit1000.log &
 
-for r in 0.001 0.002 0.005 0.01 0.02 0.05 0.1
-do
-bash slurm_train.sh a100 imgnt --config-file configs/vit_100cls_advinput.yaml --adv.radius_input=$r --adv.step_size_input=$r --logging.folder=./outputs/vit_imagenet100_advinput$r &> logs/vit100_advinput${r}.log &
-done
+# for r in 0.001 0.002 0.005 0.01 0.02 0.05 0.1
+# do
+# bash slurm_train.sh a100 imgnt --config-file configs/vit_100cls_advinput.yaml --adv.radius_input=$r --adv.step_size_input=$r --logging.folder=./outputs/vit_imagenet100_advinput$r &> logs/vit100_advinput${r}.log &
+# done
 
-for r in 0.001 0.002 0.005 0.01 0.02 0.05
+# for r in 0.001 0.002 0.005 0.01 0.02 0.05
+# do
+# for l in 0 1 2 3 4 5
+# do
+# adv_features='{"'"$l"'":{"radius":'"$r"',"step_size":'"$r"'}}'
+# bash slurm_train.sh a100 imgnt --config-file configs/vit_100cls_advfeature.yaml --adv.adv_features=$adv_features --logging.folder=./outputs/vit_imagenet100_advl${l}-${r}  &> logs/vit100_advl${l}-${r}.log &
+# done
+# done
+
+# for r in 0.001 0.002 0.005 0.01 0.02
+# do
+# bash slurm_train.sh a100 sam --config-file configs/vit_100cls_sam.yaml --sam.radius=$r --logging.folder=./outputs/vit_imagenet100_sam$r &> logs/vit100_sam${r}.log &
+# bash slurm_train.sh a100 sam --config-file configs/vit_1000cls_sam.yaml --sam.radius=$r --logging.folder=./outputs/vit_imagenet1000_sam$r &> logs/vit1000_sam${r}.log &
+# done
+
+bash slurm_train.sh a100 sam --config-file configs/vit_1000cls.yaml --training.epochs 300 --logging.folder=./outputs/vit_imagenet1000_e300 &> logs/vit1000_e300.log &
+bash slurm_train.sh a100 sam --config-file configs/vit_100cls.yaml --training.epochs 300 --logging.folder=./outputs/vit_imagenet100_e300 &> logs/vit100_e300.log &
+bash slurm_train.sh a100 sam --config-file configs/mvit_1000cls.yaml --training.epochs 300 --logging.folder=./outputs/mvit_imagenet1000_e300 &> logs/mvit1000_e300.log &
+bash slurm_train.sh a100 sam --config-file configs/mvit_100cls.yaml --training.epochs 300 --logging.folder=./outputs/mvit_imagenet100_e300 &> logs/mvit100_e300.log &
+for r in 0.001 0.01 0.2
 do
-for l in 0 1 2 3 4 5
-do
-adv_features='{"'"$l"'":{"radius":'"$r"',"step_size":'"$r"'}}'
-bash slurm_train.sh a100 imgnt --config-file configs/vit_100cls_advfeature.yaml --adv.adv_features=$adv_features --logging.folder=./outputs/vit_imagenet100_advl${l}-${r}  &> logs/vit100_advl${l}-${r}.log &
-done
+bash slurm_train.sh a100 sam --config-file configs/vit_1000cls.yaml --sam.radius=$r --training.epochs 300 --logging.folder=./outputs/vit_imagenet1000_sam${r}_e300 &> logs/vit1000_sam${r}_e300.log &
+bash slurm_train.sh a100 sam --config-file configs/vit_100cls.yaml --sam.radius=$r --training.epochs 300 --logging.folder=./outputs/vit_imagenet100_sam${r}_e300 &> logs/vit100_sam${r}_e300.log &
+bash slurm_train.sh a100 sam --config-file configs/mvit_1000cls.yaml --sam.radius=$r --training.epochs 300 --logging.folder=./outputs/mvit_imagenet1000_sam${r}_e300 &> logs/mvit1000_sam${r}_e300.log &
+bash slurm_train.sh a100 sam --config-file configs/mvit_100cls.yaml --sam.radius=$r --training.epochs 300 --logging.folder=./outputs/mvit_imagenet100_sam${r}_e300 &> logs/mvit100_sam${r}_e300.log &
 done
