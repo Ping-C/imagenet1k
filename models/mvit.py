@@ -719,7 +719,7 @@ class MViT(nn.Module):
 
         return names
 
-    def forward(self, x):
+    def forward(self, x, feature_noise={}, get_features=False):
         x, bchw = self.patch_embed(x)
 
         H, W = bchw[-2], bchw[-1]
@@ -733,8 +733,16 @@ class MViT(nn.Module):
             x = x + self.pos_embed
 
         thw = [H, W]
-        for blk in self.blocks:
+        if get_features:
+            features = {}
+        for bi, blk in enumerate(self.blocks):
             x, thw = blk(x, thw)
+            if bi in feature_noise:
+                if feature_noise[bi] is None:
+                    feature_noise[bi] = torch.zeros_like(x, requires_grad=True)
+                x += feature_noise[bi]
+            if get_features:
+                features[bi]=x
 
         x = self.norm(x)
 
@@ -744,7 +752,10 @@ class MViT(nn.Module):
             x = x.mean(1)
 
         x = self.head(x)
-        return x
+        if get_features:
+            return x, features
+        else:
+            return x
 
 
 def _prepare_mvit_configs(cfg):

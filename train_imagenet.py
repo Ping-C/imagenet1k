@@ -4,6 +4,7 @@ from torch.cuda.amp import GradScaler
 from torch.cuda.amp import autocast
 import torch.nn.functional as F
 import torch.distributed as dist
+from torch.distributed import ReduceOp
 ch.backends.cudnn.benchmark = True
 ch.autograd.profiler.emit_nvtx(False)
 ch.autograd.profiler.profile(False)
@@ -20,6 +21,7 @@ from typing import List
 from pathlib import Path
 from argparse import ArgumentParser
 import models
+from collections import defaultdict
 import ffcv
 from fastargs import get_current_config
 from fastargs.decorators import param
@@ -74,7 +76,8 @@ Section('lr', 'lr scheduling').params(
 
 Section('logging', 'how to log stuff').params(
     folder=Param(str, 'log location', required=True),
-    log_level=Param(int, '0 if only at end 1 otherwise', default=1)
+    log_level=Param(int, '0 if only at end 1 otherwise', default=1), 
+    save_checkpoint_interval=Param(int, 'intervals for saving checkpoints', default=5)
 )
 
 Section('validation', 'Validation parameters stuff').params(
@@ -92,6 +95,7 @@ Section('training', 'training hyper param stuff').params(
     grad_clip_norm=Param(float, 'gradient clipping threshold', default=None),
     epochs=Param(int, 'number of epochs', default=30),
     label_smoothing=Param(float, 'label smoothing parameter', default=0.1),
+    fixed_dropout=Param(int, 'whether to use fixed dropout pattern when running sam', default=0),
     mixup=Param(bool, 'mixup augmentation', default=False),
     distributed=Param(int, 'is distributed?', default=0),
     use_blurpool=Param(int, 'use blurpool?', default=0)
@@ -394,20 +398,28 @@ class ImageNetTrainer:
 
     @param('training.epochs')
     @param('logging.log_level')
-    def train(self, epochs, log_level):
+    @param('logging.save_checkpoint_interval')
+    def train(self, epochs, log_level, save_checkpoint_interval):
         for epoch in range(epochs):
             res = self.get_resolution(epoch)
             self.decoder.output_size = (res, res)
             train_loss = self.train_loop(epoch)
 
             if log_level > 0:
-                extra_dict = {
-                    'train_loss': train_loss,
-                    'epoch': epoch
-                }
+                if epoch % 10 == 0:
+                    extra_dict = {
+                        'train_loss': train_loss,
+                        'epoch': epoch
+                    }
+                else:
+                    extra_dict = {
+                        'train_loss': train_loss,
+                        'epoch': epoch
+                    }
 
                 self.eval_and_log(extra_dict)
-
+            if self.gpu == 0 and (epoch+1) % save_checkpoint_interval == 0:
+                ch.save(self.model.state_dict(), self.log_folder / f'epoch{epoch}.pt')
         self.eval_and_log({'epoch':epoch})
         if self.gpu == 0:
             ch.save(self.model.state_dict(), self.log_folder / 'final_weights.pt')
@@ -487,7 +499,8 @@ class ImageNetTrainer:
     @param('adv.num_steps')
     @param('adv.adv_loss_weight')
     @param('sam.radius')
-    def train_loop(self, epoch, log_level, grad_clip_norm, num_steps=0, adv_loss_weight=0, radius=0):
+    @param('training.fixed_dropout')
+    def train_loop(self, epoch, log_level, grad_clip_norm, num_steps=0, adv_loss_weight=0, radius=0, fixed_dropout=False):
         model = self.model
         model.train()
         losses = []
@@ -508,10 +521,13 @@ class ImageNetTrainer:
             # generate adversarial examples/intermediate adversarial examples
             if adv:
                 images_adv, features_adv = self.adv_step(self.model, images, target)
-
+            if fixed_dropout:
+                fixed_seed = ch.randint(0, 999999, size=(1,), device=images.device)
             with autocast():
                 if sam:
                     with self.model.no_sync():
+                        if fixed_dropout:
+                            ch.cuda.manual_seed(fixed_seed)
                         output = self.model(images)
                         loss_train = self.train_loss_func(output, target)
                         loss_train.backward()
@@ -524,10 +540,14 @@ class ImageNetTrainer:
                             para.pert = para.grad/norm*radius
                             para.data += para.pert
                             para.grad = None
-                            
+                
+                if fixed_dropout:
+                    ch.cuda.manual_seed(fixed_seed)
                 output = self.model(images)
                 loss_train = self.train_loss_func(output, target)
                 if adv:
+                    if fixed_dropout:
+                        ch.cuda.manual_seed(fixed_seed)
                     output_adv = self.model(images+images_adv, feature_noise=features_adv)
                     loss_train_adv = self.train_loss_func(output_adv, target)
                     loss_train = loss_train_adv * adv_loss_weight + loss_train * (1-adv_loss_weight)
@@ -566,11 +586,121 @@ class ImageNetTrainer:
             ### Logging end
         return (sum(losses)/len(losses)).item()
 
+    def gsnr(self):
+        # return gsnr of each layers
+        # loop through a certain number of training examples
+        # backward with no sync
+        # calculate mean & square mean of gradient of each parameters
+        # aggregate the gsnr by layer
+        iterator = tqdm(self.train_loader)
+        with autocast():
+            for ix, (images, target) in enumerate(iterator):
+                for i in range(len(target)):
+                    image_cur = images[i:i+1]
+                    target_cur = target[i:i+1]
+                    with self.model.no_sync():
+                        output = self.model(image_cur)
+                        loss_train = self.train_loss_func(output, target_cur)
+                        loss_train.backward()
+                        for para in self.model.parameters():
+                            if hasattr(para, 'gradmean'):
+                                para.gradmean += para.grad
+                            else:
+                                para.gradmean = para.grad
+                            if hasattr(para, 'gradsquaremean'):
+                                para.gradsquaremean += para.grad ** 2
+                            else:
+                                para.gradsquaremean = para.grad ** 2
+                            if hasattr(para, 'count'):
+                                para.count += 1
+                            else:
+                                para.count = ch.tensor([1], device=images.device)
+                            para.grad = None
+                if ix == 100:
+                    break
+            for i, para in enumerate(self.model.parameters()):
+                dist.all_reduce(para.gradmean, op=ReduceOp.SUM)
+                dist.all_reduce(para.gradsquaremean, op=ReduceOp.SUM)
+                dist.all_reduce(para.count, op=ReduceOp.SUM)
+                para.gradmean /= para.count
+                para.gradsquaremean /= para.count
+                para.gradvar = para.gradsquaremean - para.gradmean ** 2
+                para.gsnr = (para.gradmean**2)/para.gradvar
+                del para.gradmean
+                del para.gradsquaremean
+                del para.count
+                delattr(para, 'gradmean')
+                delattr(para, 'gradsquaremean')
+                delattr(para, 'gradvar')
+            
+            gsnrs = []
+            for li, layer in enumerate(self.model.module.transformer.layers):
+                gsnr = None
+                count = None
+                for para in layer.parameters():
+                    if gsnr is None:
+                        gsnr = para.gsnr.sum()
+                        count = para.gsnr.numel()
+                    else:
+                        gsnr += para.gsnr.sum()
+                        count += para.gsnr.numel()
+                    del para.gsnr
+                    delattr(para, 'gsnr')
+                gsnr /= count
+                gsnrs.append(gsnr.detach().item())
+            return gsnrs
+
+    def knn(self):
+        # loop through certain number of training examples
+        # extract per layer features
+        # calculate the distance matrix
+        # calculate knn accuracy by layers
+        feature_bank = defaultdict(list)
+        labels = []
+        with ch.no_grad():
+            iterator = tqdm(self.train_loader)
+            with autocast():
+                for ix, (images, target) in enumerate(iterator):
+                    output, features = self.model(images, get_features=True)
+                    labels.append(target)
+                    for key in features:
+                        batch_size = len(output)
+                        feature_bank[key].append(features[key].view(batch_size, -1))
+                    if ix == 50:
+                        break
+            labels = ch.cat(labels)
+            # calculate distance matrix by layers
+            acc_by_layers = [0]*len(feature_bank)
+            distance = ch.ones((len(labels), len(labels)), device=images.device)
+            for i in range(len(feature_bank)):
+                distance[:] = - float('inf') 
+                vs = feature_bank[i]
+                b_size = len(vs[0])
+                for v in vs:
+                    v /= v.norm(dim=1, keepdim=True, p=2)
+                for v1_i, v1 in enumerate(vs):
+                    for v2_i, v2 in enumerate(vs):
+                        distance[v1_i*b_size:v1_i*b_size+b_size, v2_i*b_size:v2_i*b_size+b_size] = v1 @ v2.T
+                distance[ch.arange(len(distance)), ch.arange(len(distance))] = -float('inf')
+                knn = distance.topk(20, largest=True)
+                predictions = labels[knn.indices].mode(dim=1).values
+                acc = (predictions==labels).float().mean()
+                
+                dist.all_reduce(acc, op=ReduceOp.AVG)                
+                acc_by_layers[i] = acc.item()
+            # clean up
+            del distance
+            for i in range(len(feature_bank)):
+                for v in feature_bank[i]:
+                    del v
+                del feature_bank[i]
+            del feature_bank
+        return acc_by_layers
+
     @param('validation.lr_tta')
     def val_loop(self, lr_tta):
         model = self.model
         model.eval()
-
         with ch.no_grad():
             with autocast():
                 for images, target in tqdm(self.val_loader):

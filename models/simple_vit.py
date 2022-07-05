@@ -72,7 +72,9 @@ class Transformer(nn.Module):
                 Attention(dim, heads = heads, dim_head = dim_head),
                 FeedForward(dim, mlp_dim)
             ]))
-    def forward(self, x, feature_noise = {}):
+    def forward(self, x, feature_noise = {}, get_features=False):
+        if get_features:
+            features = {}
         for li, (attn, ff) in enumerate(self.layers):
             x = attn(x) + x
             x = ff(x) + x
@@ -80,7 +82,12 @@ class Transformer(nn.Module):
                 if feature_noise[li] is None:
                     feature_noise[li] = torch.zeros_like(x, requires_grad=True)
                 x += feature_noise[li]
-        return x
+            if get_features:
+                features[li] = x
+        if get_features:
+            return x, features
+        else:
+            return x
 
 class SimpleViT(nn.Module):
     def __init__(self, *, image_size, patch_size, num_classes, dim, depth, heads, mlp_dim, channels = 3, dim_head = 64):
@@ -106,15 +113,20 @@ class SimpleViT(nn.Module):
             nn.Linear(dim, num_classes)
         )
 
-    def forward(self, img, feature_noise={}):
+    def forward(self, img, feature_noise={}, get_features=False):
         *_, h, w, dtype = *img.shape, img.dtype
 
         x = self.to_patch_embedding(img)
         pe = posemb_sincos_2d(x)
         x = rearrange(x, 'b ... d -> b (...) d') + pe
-
-        x = self.transformer(x, feature_noise=feature_noise)
+        if get_features:
+            x, features = self.transformer(x, feature_noise=feature_noise, get_features=get_features)
+        else:
+            x = self.transformer(x, feature_noise=feature_noise)
         x = x.mean(dim = 1)
 
         x = self.to_latent(x)
-        return self.linear_head(x)
+        if get_features:
+            return self.linear_head(x), features
+        else:
+            return self.linear_head(x)

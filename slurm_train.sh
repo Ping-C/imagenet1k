@@ -19,5 +19,6 @@ srun -p ${PARTITION} \
     --ntasks-per-node=1 \
     --cpus-per-task=$((CPUS_PER_TASK*GPUS)) \
     --kill-on-bad-exit=1 \
+    --exclude=a100-st-p4d24xlarge-260 \
     ${SRUN_ARGS} \
     python train_imagenet.py ${CONFIG} ${PY_ARGS} --dist.port=$MASTER_PORT

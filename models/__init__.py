@@ -1,4 +1,4 @@
-from .vit import ViT
+
 from .simple_vit import SimpleViT
 from .mvit import MViT
 from .mvit_config import get_cfg
