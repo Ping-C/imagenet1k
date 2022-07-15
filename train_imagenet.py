@@ -467,7 +467,13 @@ class ImageNetTrainer:
                 
         self.eval_and_log({'epoch':epoch})
         if self.rank == 0:
-            ch.save(self.model.state_dict(), self.log_folder / 'final_weights.pt')
+            checkpoint_dict = {
+                    'state_dict': self.model.state_dict(),
+                    'starting_epoch': epoch+1,
+                    'optimizer': self.optimizer.state_dict(),
+                    'args': {'.'.join(k): self.all_params[k] for k in self.all_params.entries.keys()}
+                }
+            ch.save(checkpoint_dict, self.log_folder / f'final_weights.pt')
 
     def eval_and_log(self, extra_dict={}):
         start_val = time.time()
