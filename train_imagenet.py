@@ -46,6 +46,7 @@ from ffcv.transforms import ToTensor, ToDevice, Squeeze, NormalizeImage, \
 from ffcv.fields.rgb_image import CenterCropRGBImageDecoder, \
     RandomResizedCropRGBImageDecoder
 from ffcv.fields.basics import IntDecoder
+from models.mvit_decoupled import LayerNormDecoupled
 
 Section('model', 'model details').params(
     arch=Param(str, default='resnet18'),
@@ -125,6 +126,11 @@ Section('dist', 'distributed training options').params(
     address=Param(str, 'address', default='localhost'),
     port=Param(str, 'port', default='12355'),
     multinode=Param(int, 'multinode', default=0)
+)
+
+
+Section('eval', 'special eval flags').params(
+    layernorm_switch=Param(int, 'number gpus', default=0)
 )
 
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406]) * 255
@@ -226,11 +232,13 @@ class ImageNetTrainer:
                         latest_epoch_ckpt_file = file
             print(f"latest_epoch_path:{Path(self.log_folder)/latest_epoch_ckpt_file}")
             checkpoint_dict = ch.load(Path(self.log_folder)/latest_epoch_ckpt_file)
-
-            # load model, optimizer, starting epoch number
-            self.model.load_state_dict(checkpoint_dict['state_dict'])
-            self.optimizer.load_state_dict(checkpoint_dict['optimizer'])
-            self.starting_epoch = checkpoint_dict['starting_epoch']
+            if 'state_dict' in checkpoint_dict:
+                # load model, optimizer, starting epoch number
+                self.model.load_state_dict(checkpoint_dict['state_dict'])
+                self.optimizer.load_state_dict(checkpoint_dict['optimizer'])
+                self.starting_epoch = checkpoint_dict['starting_epoch']
+            else:
+                self.model.load_state_dict(checkpoint_dict)
         else:
             self.starting_epoch = 0
         
@@ -481,11 +489,9 @@ class ImageNetTrainer:
         val_time = time.time() - start_val
         if self.rank == 0:
             self.log(dict({
-                'current_lr': self.optimizer.param_groups[0]['lr'],
-                'top_1': stats['top_1'],
-                'top_5': stats['top_5'],
+                'current_lr': self.optimizer.param_groups[0]['lr'],\
                 'val_time': val_time
-            }, **extra_dict))
+            }, **extra_dict, **stats))
 
         return stats
 
@@ -798,9 +804,75 @@ class ImageNetTrainer:
         return acc_by_layers
 
     @param('validation.lr_tta')
-    def val_loop(self, lr_tta):
+    @param('eval.layernorm_switch')
+    def val_loop(self, lr_tta, layernorm_switch):
         model = self.model
         model.eval()
+        stats = {}
+        if layernorm_switch:
+            for l_i, layer in enumerate(self.model.module.blocks):
+                # switching a certain layer to adv layernorm
+                self.model.module.make_clean()
+                for module in layer.modules():
+                    if isinstance(module, LayerNormDecoupled):
+                        module.make_adv()
+                
+                with ch.no_grad():
+                    with autocast():
+                        for images, target in tqdm(self.val_loader):
+                            output = self.model(images)
+                            if lr_tta:
+                                output += self.model(ch.flip(images, dims=[3]))
+
+                            for k in ['top_1', 'top_5']:
+                                self.val_meters[k](output, target)
+
+                            loss_val = self.test_loss_func(output, target)
+                            self.val_meters['loss'](loss_val)
+
+                stats = {f"{k}_adv{l_i}": m.compute().item() for k, m in self.val_meters.items()} | stats
+                [meter.reset() for meter in self.val_meters.values()]
+            
+            # switching a certain layer to adv layernorm
+            self.model.module.make_adv()
+            with ch.no_grad():
+                with autocast():
+                    for images, target in tqdm(self.val_loader):
+                        output = self.model(images)
+                        if lr_tta:
+                            output += self.model(ch.flip(images, dims=[3]))
+
+                        for k in ['top_1', 'top_5']:
+                            self.val_meters[k](output, target)
+
+                        loss_val = self.test_loss_func(output, target)
+                        self.val_meters['loss'](loss_val)
+
+            stats = {f"{k}_advall": m.compute().item() for k, m in self.val_meters.items()} | stats
+            [meter.reset() for meter in self.val_meters.values()]
+
+            for l_i, layer in enumerate(self.model.module.blocks):
+                # switching a certain layer to adv layernorm
+                self.model.module.make_adv()
+                for module in layer.modules():
+                    if isinstance(module, LayerNormDecoupled):
+                        module.make_clean()
+                
+                with ch.no_grad():
+                    with autocast():
+                        for images, target in tqdm(self.val_loader):
+                            output = self.model(images)
+                            if lr_tta:
+                                output += self.model(ch.flip(images, dims=[3]))
+
+                            for k in ['top_1', 'top_5']:
+                                self.val_meters[k](output, target)
+
+                            loss_val = self.test_loss_func(output, target)
+                            self.val_meters['loss'](loss_val)
+
+                stats = {f"{k}_clean{l_i}": m.compute().item() for k, m in self.val_meters.items()} | stats
+                [meter.reset() for meter in self.val_meters.values()]
         if isinstance(self.model.module, SimpleViTDecoupledLN) or isinstance(self.model.module, MViTDecoupled) :
             self.model.module.make_clean()
         with ch.no_grad():
@@ -816,7 +888,7 @@ class ImageNetTrainer:
                     loss_val = self.test_loss_func(output, target)
                     self.val_meters['loss'](loss_val)
 
-        stats = {k: m.compute().item() for k, m in self.val_meters.items()}
+        stats = {k: m.compute().item() for k, m in self.val_meters.items()} | stats
         [meter.reset() for meter in self.val_meters.values()]
         return stats
 
@@ -842,11 +914,16 @@ class ImageNetTrainer:
             with open(folder / 'params.json', 'w+') as handle:
                 json.dump(params, handle)
 
-    def log(self, content):
+    @param('training.eval_only')
+    def log(self, content, eval_only=False):
         print(f'=> Log: {content}')
         if self.rank != 0: return
         cur_time = time.time()
-        with open(self.log_folder / 'log', 'a+') as fd:
+        if eval_only:
+            log_filename = 'log_eval'
+        else:
+            log_filename = 'log'
+        with open(self.log_folder / log_filename, 'a+') as fd:
             fd.write(json.dumps({
                 'timestamp': cur_time,
                 'relative_time': cur_time - self.start_time,
