@@ -79,7 +79,8 @@ Section('lr', 'lr scheduling').params(
 Section('logging', 'how to log stuff').params(
     folder=Param(str, 'log location', required=True),
     log_level=Param(int, '0 if only at end 1 otherwise', default=1), 
-    save_checkpoint_interval=Param(int, 'intervals for saving checkpoints', default=5)
+    save_checkpoint_interval=Param(int, 'intervals for saving checkpoints', default=5), 
+    resume_id=Param(str, 'resume id', default=None)
 )
 
 Section('validation', 'Validation parameters stuff').params(
@@ -194,12 +195,16 @@ class BlurPoolConv2d(ch.nn.Module):
 
 class ImageNetTrainer:
     @param('training.distributed')
-    def __init__(self, rank, distributed):
+    @param('logging.resume_id')
+    def __init__(self, rank, distributed, resume_id = None):
         self.all_params = get_current_config()
         self.rank = rank
         self.gpu = self.rank % ch.cuda.device_count()
-
-        self.uid = str(uuid4())
+        print("rank:", self.rank, "gpu:", self.gpu, 'DEVICECOUNT', ch.cuda.device_count())
+        if resume_id is None:
+            self.uid = str(uuid4())
+        else:
+            self.uid = resume_id
 
         if distributed:
             self.setup_distributed()
@@ -209,6 +214,25 @@ class ImageNetTrainer:
         self.model, self.scaler = self.create_model_and_scaler()
         self.create_optimizer()
         self.initialize_logger()
+        if resume_id is not None:
+            # traverse the folder and find the latest checkpoint
+            latest_epoch_ckpt_file = None
+            latest_epoch = -float('inf')
+            for file in os.listdir(self.log_folder):
+                if 'epoch' in file:
+                    epoch = int(file.replace('epoch', '').replace('.pt', ''))
+                    if epoch > latest_epoch:
+                        latest_epoch = epoch
+                        latest_epoch_ckpt_file = file
+            print(f"latest_epoch_path:{Path(self.log_folder)/latest_epoch_ckpt_file}")
+            checkpoint_dict = ch.load(Path(self.log_folder)/latest_epoch_ckpt_file)
+
+            # load model, optimizer, starting epoch number
+            self.model.load_state_dict(checkpoint_dict['state_dict'])
+            self.optimizer.load_state_dict(checkpoint_dict['optimizer'])
+            self.starting_epoch = checkpoint_dict['starting_epoch']
+        else:
+            self.starting_epoch = 0
         
 
     @param('dist.address')
@@ -414,7 +438,7 @@ class ImageNetTrainer:
     @param('logging.log_level')
     @param('logging.save_checkpoint_interval')
     def train(self, epochs, log_level, save_checkpoint_interval):
-        for epoch in range(epochs):
+        for epoch in range(self.starting_epoch, epochs):
             res = self.get_resolution(epoch)
             self.decoder.output_size = (res, res)
             train_loss = self.train_loop(epoch)
@@ -433,7 +457,14 @@ class ImageNetTrainer:
 
                 self.eval_and_log(extra_dict)
             if self.rank == 0 and (epoch+1) % save_checkpoint_interval == 0:
-                ch.save(self.model.state_dict(), self.log_folder / f'epoch{epoch}.pt')
+                checkpoint_dict = {
+                    'state_dict': self.model.state_dict(),
+                    'starting_epoch': epoch+1,
+                    'optimizer': self.optimizer.state_dict(),
+                    'args': {'.'.join(k): self.all_params[k] for k in self.all_params.entries.keys()}
+                }
+                ch.save(checkpoint_dict, self.log_folder / f'epoch{epoch}.pt')
+                
         self.eval_and_log({'epoch':epoch})
         if self.rank == 0:
             ch.save(self.model.state_dict(), self.log_folder / 'final_weights.pt')
@@ -790,18 +821,17 @@ class ImageNetTrainer:
             'top_5': torchmetrics.Accuracy(compute_on_step=False, top_k=5).to(self.gpu),
             'loss': MeanScalarMetric(compute_on_step=False).to(self.gpu)
         }
-
+        folder = (Path(folder) / str(self.uid)).absolute()
+        self.log_folder = folder
         if self.rank == 0:
-            folder = (Path(folder) / str(self.uid)).absolute()
-            folder.mkdir(parents=True)
-
-            self.log_folder = folder
+            folder.mkdir(parents=True, exist_ok=True)
             self.start_time = time.time()
 
             print(f'=> Logging in {self.log_folder}')
             params = {
                 '.'.join(k): self.all_params[k] for k in self.all_params.entries.keys()
             }
+            params['logging.resume_id'] = str(self.uid)
 
             with open(folder / 'params.json', 'w+') as handle:
                 json.dump(params, handle)
