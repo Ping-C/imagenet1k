@@ -1,0 +1,43 @@
+data:
+  in_memory: 1
+  num_workers: 12
+  num_classes: 100
+  train_dataset: /fsx/pingchiang/imagenet_ffcv_100class/train_400_0.1_90.ffcv
+  val_dataset: /fsx/pingchiang/imagenet_ffcv_100class/val_400_0.1_90.ffcv
+dist:
+  world_size: 8
+logging:
+  folder: ./outputs/mvit_imagenet100_advinput0.01
+  log_level: 2
+lr:
+  lr: 0.001
+  lr_schedule_type: cyclic_warm
+  warmup_epochs: 9
+model:
+  arch: mvit
+resolution:
+  end_ramp: 13
+  max_res: 224
+  min_res: 224
+  start_ramp: 11
+training:
+  batch_size: 128
+  bn_wd: 0
+  distributed: 1
+  epochs: 90
+  label_smoothing: 0.1
+  momentum: 0.9
+  optimizer: adamw
+  grad_clip_norm: 1.0
+  weight_decay: 0.0001
+  use_blurpool: 1
+  mixup: 0
+adv:
+  num_steps: 1
+  radius_input: 0.01
+  step_size_input: 0.01
+  adv_loss_weight: 0.5
+validation:
+  batch_size: 64
+  lr_tta: true
+  resolution: 224

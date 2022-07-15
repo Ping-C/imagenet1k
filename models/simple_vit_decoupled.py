@@ -24,11 +24,27 @@ def posemb_sincos_2d(patches, temperature = 10000, dtype = torch.float32):
 
 # classes
 
+class LayerNormDecoupled(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.layernorm_clean = nn.LayerNorm(dim)
+        self.layernorm_adv = nn.LayerNorm(dim)
+        self.clean = True
+    def forward(self, x):
+        if self.clean:
+            return self.layernorm_clean(x)
+        else:
+            return self.layernorm_adv(x)
+    def make_clean(self):
+        self.clean = True
+    def make_adv(self):
+        self.clean = False
+
 class FeedForward(nn.Module):
     def __init__(self, dim, hidden_dim):
         super().__init__()
         self.net = nn.Sequential(
-            nn.LayerNorm(dim),
+            LayerNormDecoupled(dim),
             nn.Linear(dim, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, dim),
@@ -42,7 +58,7 @@ class Attention(nn.Module):
         inner_dim = dim_head *  heads
         self.heads = heads
         self.scale = dim_head ** -0.5
-        self.norm = nn.LayerNorm(dim)
+        self.norm = LayerNormDecoupled(dim)
 
         self.attend = nn.Softmax(dim = -1)
 
@@ -91,46 +107,6 @@ class Transformer(nn.Module):
         else:
             return x
 
-class TransformerTwoHead(nn.Module):
-    def __init__(self, dim, depth, heads, dim_head, mlp_dim, split_layer=None):
-        super().__init__()
-        self.layers = nn.ModuleList([])
-        for _ in range(depth):
-            self.layers.append(nn.ModuleList([
-                Attention(dim, heads = heads, dim_head = dim_head),
-                FeedForward(dim, mlp_dim)
-            ]))
-        self.aux_layers = nn.ModuleList([])
-        self.split_layer = split_layer
-        for _ in range(split_layer, depth):
-            self.aux_layers.append(nn.ModuleList([
-                Attention(dim, heads = heads, dim_head = dim_head),
-                FeedForward(dim, mlp_dim)
-            ]))
-
-    def forward(self, x, feature_noise = {}, get_features=False, aux_branch=False, freeze_layers=None):
-        if get_features:
-            features = {}
-        if aux_branch:
-            layers = self.layers[:self.split_layer] + self.aux_layers
-        else:
-            layers = self.layers
-        for li, (attn, ff) in enumerate(layers):
-            x = attn(x) + x
-            x = ff(x) + x
-            if li in feature_noise:
-                if feature_noise[li] is None:
-                    feature_noise[li] = torch.zeros_like(x, requires_grad=True)
-                x += feature_noise[li] 
-            if freeze_layers is not None and li == freeze_layers-1:
-                x = x.detach()
-            if get_features:
-                features[li] = x
-        if get_features:
-            return x, features
-        else:
-            return x
-
 class TransformerDecoupledLN(nn.Module):
     def __init__(self, dim, depth, heads, dim_head, mlp_dim):
         super().__init__()
@@ -159,7 +135,11 @@ class TransformerDecoupledLN(nn.Module):
         else:
             return x
 
-class SimpleViT(nn.Module):
+
+
+
+
+class SimpleViTDecoupledLN(nn.Module):
     def __init__(self, *, image_size, patch_size, num_classes, dim, depth, heads, mlp_dim, channels = 3, dim_head = 64, probe=False):
         super().__init__()
         image_height, image_width = pair(image_size)
@@ -179,7 +159,7 @@ class SimpleViT(nn.Module):
 
         self.to_latent = nn.Identity()
         self.linear_head = nn.Sequential(
-            nn.LayerNorm(dim),
+            LayerNormDecoupled(dim),
             nn.Linear(dim, num_classes)
         )
         if probe:
@@ -220,67 +200,16 @@ class SimpleViT(nn.Module):
         for layer in self.transformer.layers[:layers_n]:
             for para in layer.parameters():
                 para.requires_grad = True
+    def make_clean(self):
+        for module in self.modules():
+            if isinstance(module, LayerNormDecoupled):
+                module.make_clean()
+    def make_adv(self):
+        for module in self.modules():
+            if isinstance(module, LayerNormDecoupled):
+                module.make_adv()
+    
+        
                 
 
-class SimpleViTTwoHead(nn.Module):
-    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, heads, mlp_dim, split_layer, channels = 3, dim_head = 64, probe=False, ):
-        super().__init__()
-        image_height, image_width = pair(image_size)
-        patch_height, patch_width = pair(patch_size)
-
-        assert image_height % patch_height == 0 and image_width % patch_width == 0, 'Image dimensions must be divisible by the patch size.'
-
-        num_patches = (image_height // patch_height) * (image_width // patch_width)
-        patch_dim = channels * patch_height * patch_width
-
-        self.to_patch_embedding = nn.Sequential(
-            Rearrange('b c (h p1) (w p2) -> b h w (p1 p2 c)', p1 = patch_height, p2 = patch_width),
-            nn.Linear(patch_dim, dim),
-        )
-
-        self.transformer = TransformerTwoHead(dim, depth, heads, dim_head, mlp_dim, split_layer=split_layer)
-
-        self.to_latent = nn.Identity()
-        self.linear_head = nn.Sequential(
-            nn.LayerNorm(dim),
-            nn.Linear(dim, num_classes)
-        )
-        if probe:
-            self.linear_probes = nn.ModuleList()
-            for d in range(depth):
-                self.linear_probes.append(nn.Sequential(
-                nn.LayerNorm(dim),
-                nn.Linear(dim, num_classes)
-            ))
-
-    def forward(self, img, feature_noise={}, get_features=False, get_linear_probes=False, aux_branch=False, freeze_layers=None):
-        *_, h, w, dtype = *img.shape, img.dtype
-
-        x = self.to_patch_embedding(img)
-        pe = posemb_sincos_2d(x)
-        x = rearrange(x, 'b ... d -> b (...) d') + pe
-        if get_features:
-            x, features = self.transformer(x, feature_noise=feature_noise, get_features=get_features, aux_branch=aux_branch, freeze_layers=freeze_layers)
-        else:
-            x = self.transformer(x, feature_noise=feature_noise, aux_branch=aux_branch, freeze_layers=freeze_layers)
-        if get_linear_probes:
-            for k, v in features.items():
-                features[k] = self.linear_probes[k](v.mean(dim = 1).detach())
-        x = x.mean(dim = 1)
-
-        x = self.to_latent(x)
-        if get_features:
-            return self.linear_head(x), features
-        else:
-            return self.linear_head(x)
-    def freeze_layers(self, layers_n):
-        # freeze all layers prior to layers_n
-        for layer in self.transformer.layers[:layers_n]:
-            for para in layer.parameters():
-                para.requires_grad = False
-    def unfreeze_layers(self, layers_n):
-        # unfreeze all layers prior to layers_n
-        for layer in self.transformer.layers[:layers_n]:
-            for para in layer.parameters():
-                para.requires_grad = True
                 

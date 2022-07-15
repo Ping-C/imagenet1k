@@ -25,6 +25,21 @@ except ImportError:
 import torch
 import torch.nn as nn
 
+class LayerNormDecoupled(nn.Module):
+    def __init__(self, dim, **kwargs):
+        super().__init__()
+        self.layernorm_clean = nn.LayerNorm(dim, **kwargs)
+        self.layernorm_adv = nn.LayerNorm(dim, **kwargs)
+        self.clean = True
+    def forward(self, x):
+        if self.clean:
+            return self.layernorm_clean(x)
+        else:
+            return self.layernorm_adv(x)
+    def make_clean(self):
+        self.clean = True
+    def make_adv(self):
+        self.clean = False
 
 class Mlp(nn.Module):
     def __init__(
@@ -569,7 +584,8 @@ class TransformerBasicHead(nn.Module):
         return x
 
 
-class MViT(nn.Module):
+
+class MViTDecoupled(nn.Module):
     """
     Improved Multiscale Vision Transformers for Classification and Detection
     Yanghao Li*, Chao-Yuan Wu*, Haoqi Fan, Karttikeya Mangalam, Bo Xiong, Jitendra Malik,
@@ -598,7 +614,7 @@ class MViT(nn.Module):
         self.use_abs_pos = cfg.MVIT.USE_ABS_POS
         self.zero_decay_pos_cls = cfg.MVIT.ZERO_DECAY_POS_CLS
 
-        norm_layer = partial(nn.LayerNorm, eps=1e-6)
+        norm_layer = partial(LayerNormDecoupled, eps=1e-6)
 
         # if cfg.MODEL.ACT_CHECKPOINT:
         #     validate_checkpoint_wrapper_import(checkpoint_wrapper)
@@ -725,7 +741,7 @@ class MViT(nn.Module):
 
     def forward(self, x, feature_noise={}, get_features=False, get_linear_probes=False, freeze_layers=None):
         if freeze_layers is not None:
-            raise NotImplementedError("freeze layers are not implemented")
+            raise NotImplementedError("freeze layer is not implemented for mvit")
         x, bchw = self.patch_embed(x)
 
         H, W = bchw[-2], bchw[-1]
@@ -776,6 +792,14 @@ class MViT(nn.Module):
         for layer in self.blocks[:layers_n]:
             for para in layer.parameters():
                 para.requires_grad = True
+    def make_clean(self):
+        for module in self.modules():
+            if isinstance(module, LayerNormDecoupled):
+                module.make_clean()
+    def make_adv(self):
+        for module in self.modules():
+            if isinstance(module, LayerNormDecoupled):
+                module.make_adv()
                 
 
 def _prepare_mvit_configs(cfg):

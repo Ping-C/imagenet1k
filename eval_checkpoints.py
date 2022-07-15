@@ -28,9 +28,7 @@ from fastargs.decorators import param
 from fastargs import Param, Section
 from fastargs.validation import And, OneOf
 from fastargs.validation import Checker
-from models import SimpleViTDecoupledLN, MViTDecoupled
 import json
-import os
 class DictChecker(Checker):
     def check(self, value):
         return json.loads(value)
@@ -98,32 +96,20 @@ Section('training', 'training hyper param stuff').params(
     epochs=Param(int, 'number of epochs', default=30),
     label_smoothing=Param(float, 'label smoothing parameter', default=0.1),
     fixed_dropout=Param(int, 'whether to use fixed dropout pattern when running sam', default=0),
-    mixup=Param(int, 'mixup augmentation', default=0),
+    mixup=Param(int, 'mixup augmentation', default=False),
     distributed=Param(int, 'is distributed?', default=0),
     use_blurpool=Param(int, 'use blurpool?', default=0)
 )
-
-Section('adv', 'hyper parameter related to adversarial training').params(
-    num_steps=Param(int, 'number of adversarial steps'),
-    radius_input=Param(float, 'adversarial radius'),
-    step_size_input=Param(float, 'step size for adversarial step'),
-    adv_features=Param(DictChecker(), 'attacked feature layers'),
-    adv_loss_weight=Param(float, 'weight assigned to adversarial loss'),
-    adv_loss_smooth=Param(float, 'weight assigned to adversarial loss'),
-    freeze_layers=Param(int, 'number of layers to freeze when conducting adversarial training', default=None),
-    split_layer=Param(int, 'the index of layer after which the model is split into two', default=None),
-    flip=Param(int, 'the index of layer after which the model is split into two', default=0),
-    split_backward=Param(int, 'splitting two backward pass', default=0)
-)
-Section('sam', 'hyper parameter related to sam training').params(
-    radius=Param(float, 'adversarial radius'),
+Section('eval', 'evaluation parameters').params(
+    checkpoint_path=Param(str, 'path for loading the checkpoints'),
+    linear_probe=Param(int, 'whether to evaluate linear probe'),
+    gsnr=Param(int, 'whether to eval gsnr')
 )
 
 Section('dist', 'distributed training options').params(
     world_size=Param(int, 'number gpus', default=1),
     address=Param(str, 'address', default='localhost'),
-    port=Param(str, 'port', default='12355'),
-    multinode=Param(int, 'multinode', default=0)
+    port=Param(str, 'port', default='12355')
 )
 
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406]) * 255
@@ -194,10 +180,9 @@ class BlurPoolConv2d(ch.nn.Module):
 
 class ImageNetTrainer:
     @param('training.distributed')
-    def __init__(self, rank, distributed):
+    def __init__(self, gpu, distributed):
         self.all_params = get_current_config()
-        self.rank = rank
-        self.gpu = self.rank % ch.cuda.device_count()
+        self.gpu = gpu
 
         self.uid = str(uuid4())
 
@@ -218,7 +203,7 @@ class ImageNetTrainer:
         os.environ['MASTER_ADDR'] = address
         os.environ['MASTER_PORT'] = port
 
-        dist.init_process_group("nccl", rank=self.rank, world_size=world_size)
+        dist.init_process_group("nccl", rank=self.gpu, world_size=world_size)
         ch.cuda.set_device(self.gpu)
 
     def cleanup_distributed(self):
@@ -257,70 +242,35 @@ class ImageNetTrainer:
     @param('training.optimizer')
     @param('training.weight_decay')
     @param('training.label_smoothing')
-    @param('training.mixup')
-    @param('adv.adv_loss_smooth')
+    @param('eval.linear_probe')
     def create_optimizer(self, momentum, optimizer, weight_decay,
-                         label_smoothing, mixup, adv_loss_smooth=None):
-        if optimizer == 'sgd':
+                         label_smoothing, linear_probe):
+        if linear_probe:
+            if optimizer == 'sgd':
 
-            # Only do weight decay on non-batchnorm parameters
-            all_params = list(self.model.named_parameters())
-            bn_params = [v for k, v in all_params if ('bn' in k)]
-            other_params = [v for k, v in all_params if not ('bn' in k)]
-            param_groups = [{
-                'params': bn_params,
-                'weight_decay': 0.
-            }, {
-                'params': other_params,
-                'weight_decay': weight_decay
-            }]
+                all_params = list(self.model.named_parameters())            
+                probe_params = [v for k, v in all_params if ('probe' in k)]
+                self.optimizer = ch.optim.SGD(probe_params, lr=1, momentum=momentum)
 
-            self.optimizer = ch.optim.SGD(param_groups, lr=1, momentum=momentum)
-        elif optimizer == 'adam':
-             # Only do weight decay on non-batchnorm parameters
-            all_params = list(self.model.named_parameters())
-            bn_params = [v for k, v in all_params if ('bn' in k)]
-            other_params = [v for k, v in all_params if not ('bn' in k)]
-            param_groups = [{
-                'params': bn_params,
-                'weight_decay': 0.
-            }, {
-                'params': other_params,
-                'weight_decay': weight_decay
-            }]
+            elif optimizer == 'adam':
+                # Only do weight decay on non-batchnorm parameters
+                all_params = list(self.model.named_parameters())            
+                probe_params = [v for k, v in all_params if ('probe' in k)]
 
-            self.optimizer = ch.optim.Adam(param_groups, lr=1)
-        elif optimizer == 'adamw':
+                self.optimizer = ch.optim.Adam(probe_params, lr=1)
+            elif optimizer == 'adamw':
+                all_params = list(self.model.named_parameters())
+                
+                probe_params = [v for k, v in all_params if ('probe' in k)]
+                self.optimizer = ch.optim.AdamW(probe_params, lr=1)
+            else:
+                raise ValueError(f"unsupported optimizer: {optimizer}")
+        else:
             all_params = list(self.model.named_parameters())
-            bn_params = [v for k, v in all_params if ('bn' in k)]
-            other_params = [v for k, v in all_params if not ('bn' in k)]
-            param_groups = [{
-                'params': bn_params,
-                'weight_decay': 0.
-            }, {
-                'params': other_params,
-                'weight_decay': weight_decay
-            }]
-            self.optimizer = ch.optim.AdamW(param_groups, lr=1)
-        else:
-            raise ValueError(f"unsupported optimizer: {optimizer}")
-        if mixup:
-            self.aux_loss = ch.nn.CrossEntropyLoss(label_smoothing=label_smoothing)
-            def mixuploss(output, target):
-                loss_1 = self.aux_loss(output, target[:, 0].long())
-                loss_2 = self.aux_loss(output, target[:, 1].long())
-                lam = target[0, 2]
-                loss_train = loss_1 * lam + loss_2 * (1-lam)
-                return loss_train
-            self.train_loss_func = mixuploss
-            self.test_loss_func = ch.nn.CrossEntropyLoss(label_smoothing=label_smoothing)
-        else:
-            self.train_loss_func = ch.nn.CrossEntropyLoss(label_smoothing=label_smoothing)
-            self.test_loss_func = self.train_loss_func
-        if adv_loss_smooth is None:
-            self.train_adv_loss_func = self.train_loss_func
-        else:
-            self.train_adv_loss_func = ch.nn.CrossEntropyLoss(label_smoothing=adv_loss_smooth)
+            self.optimizer = ch.optim.AdamW(self.model.parameters(), lr=1)
+        
+        self.train_loss_func = ch.nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+        self.test_loss_func = self.train_loss_func
     @param('data.train_dataset')
     @param('data.num_workers')
     @param('training.batch_size')
@@ -412,61 +362,64 @@ class ImageNetTrainer:
 
     @param('training.epochs')
     @param('logging.log_level')
-    @param('logging.save_checkpoint_interval')
-    def train(self, epochs, log_level, save_checkpoint_interval):
-        for epoch in range(epochs):
-            res = self.get_resolution(epoch)
+    @param('eval.checkpoint_path')
+    @param('eval.linear_probe')
+    @param('eval.gsnr')
+    def train(self, epochs, log_level, checkpoint_path, linear_probe=False, gsnr=False):
+        for epoch_ckpt in range(4, 300, 5):
+            res = self.get_resolution(epoch_ckpt)
             self.decoder.output_size = (res, res)
-            train_loss = self.train_loop(epoch)
 
+            # reset weights
+            def reset_weights(m):
+                if hasattr(m, 'reset_parameters'):
+                    m.reset_parameters()
+            self.model.apply(reset_weights)
+
+            # reload pretrained checkpoints
+            self.model.load_state_dict(
+                ch.load(
+                f'{checkpoint_path}/epoch{epoch_ckpt}.pt',
+            map_location={'cuda:%d' % 0: 'cuda:%d' % self.gpu}), 
+            strict=False)
+
+            if linear_probe:
+                # train the respective head on frozen features
+                for epoch_finetune in range(epochs):
+                    self.train_loop(epoch_finetune)
+            
+            self.model.eval()
             if log_level > 0:
-                if epoch % 10 == 0:
-                    extra_dict = {
-                        'train_loss': train_loss,
-                        'epoch': epoch
-                    }
-                else:
-                    extra_dict = {
-                        'train_loss': train_loss,
-                        'epoch': epoch
-                    }
+                extra_dict = {
+                    'epoch': epoch_ckpt
+                }
+                if gsnr:
+                    extra_dict['gsnr']=self.gsnr()
 
                 self.eval_and_log(extra_dict)
-            if self.rank == 0 and (epoch+1) % save_checkpoint_interval == 0:
-                ch.save(self.model.state_dict(), self.log_folder / f'epoch{epoch}.pt')
-        self.eval_and_log({'epoch':epoch})
-        if self.rank == 0:
-            ch.save(self.model.state_dict(), self.log_folder / 'final_weights.pt')
+
+        self.eval_and_log({'epoch':epoch_ckpt})
 
     def eval_and_log(self, extra_dict={}):
         start_val = time.time()
         stats = self.val_loop()
         val_time = time.time() - start_val
-        if self.rank == 0:
+        if self.gpu == 0:
             self.log(dict({
                 'current_lr': self.optimizer.param_groups[0]['lr'],
-                'top_1': stats['top_1'],
-                'top_5': stats['top_5'],
                 'val_time': val_time
-            }, **extra_dict))
+            }, **extra_dict, **stats))
 
         return stats
 
     @param('model.arch')
     @param('model.pretrained')
     @param('training.distributed')
-    @param('training.use_blurpool')
     @param('data.num_classes')
-    @param('adv.split_layer')
-    def create_model_and_scaler(self, arch, pretrained, distributed, use_blurpool, num_classes, split_layer=None):
+    @param('eval.linear_probe')
+    def create_model_and_scaler(self, arch, pretrained, distributed,  num_classes, linear_probe):
         scaler = GradScaler()
-        model = models.get_arch(arch, num_classes=num_classes, split_layer=split_layer)
-        def apply_blurpool(mod: ch.nn.Module):
-            for (name, child) in mod.named_children():
-                if isinstance(child, ch.nn.Conv2d) and (np.max(child.stride) > 1 and child.in_channels >= 16): 
-                    setattr(mod, name, BlurPoolConv2d(child))
-                else: apply_blurpool(child)
-        if use_blurpool: apply_blurpool(model)
+        model = models.get_arch(arch, num_classes=num_classes, probe=linear_probe)
 
         model = model.to(memory_format=ch.channels_last)
         model = model.to(self.gpu)
@@ -474,61 +427,17 @@ class ImageNetTrainer:
         if distributed:
             model = ch.nn.parallel.DistributedDataParallel(model, device_ids=[self.gpu])
         else:
-            model = ch.nn.DataParallel(model).cuda()
+            model = ch.nn.DataParallel(model)
+
         return model, scaler
     
 
-    @param('adv.num_steps')
-    @param('adv.radius_input')
-    @param('adv.step_size_input')
-    @param('adv.adv_features')
-    def adv_step(self, model, images, target,
-        num_steps=None, step_size_input=None, radius_input=None, adv_features=None, aux_branch=False):
-        input_adv_noise = ch.zeros_like(images, requires_grad=True)
-        feature_adv_noise = FeatureNoise({int(layer): None for layer in adv_features} if adv_features is not None else {})
-        for step in range(num_steps):
-            with autocast():
-                if aux_branch == False:
-                    output = self.model(images+input_adv_noise, feature_noise=feature_adv_noise)
-                else:
-                    output = self.model(images+input_adv_noise, feature_noise=feature_adv_noise, aux_branch=aux_branch)
-                loss_adv = self.train_loss_func(output, target)
-                all_step_sizes = [step_size_input]
-                all_radii = [radius_input]
-                all_noises = [input_adv_noise] 
-                if adv_features is not None:
-                    for k in adv_features:
-                        all_noises.append(feature_adv_noise[int(k)])
-                        all_step_sizes.append(adv_features[k]['step_size'])
-                        all_radii.append(adv_features[k]['radius'])
-                all_grad = ch.autograd.grad(loss_adv, all_noises)
-                # apply perturbations to each individual features
-                for noise, grad, step_size, radius in zip(all_noises, all_grad, all_step_sizes, all_radii):
-                    # normalize gradients to unit norm & times the radius
-                    # grad /= (grad.norm(dim=ch.arange(1, len(grad.shape)).tolist(), keepdim=True, p=2) + 1e-5)
-                    noise.data += grad.sign() * step_size
-                    noise.data.clamp_(-radius, +radius)
-        for k in feature_adv_noise:
-            feature_adv_noise[k] = feature_adv_noise[k].detach()
-        
-        return input_adv_noise.detach(), feature_adv_noise
-
     @param('logging.log_level')
     @param('training.grad_clip_norm')
-    @param('adv.num_steps')
-    @param('adv.adv_loss_weight')
-    @param('adv.freeze_layers')
-    @param('sam.radius')
-    @param('training.fixed_dropout')
-    @param('adv.split_layer')
-    @param('adv.flip')
-    @param('adv.split_backward')
-    def train_loop(self, epoch, log_level, grad_clip_norm, num_steps=0, adv_loss_weight=0, radius=0, fixed_dropout=False, freeze_layers=None, split_layer=None, flip=False, split_backward=False):
+    def train_loop(self, epoch, log_level, grad_clip_norm):
         model = self.model
         model.train()
         losses = []
-        adv = num_steps > 0
-        sam = radius > 0
 
         lr_start, lr_end = self.get_lr(epoch), self.get_lr(epoch + 1)
         iters = len(self.train_loader)
@@ -542,91 +451,31 @@ class ImageNetTrainer:
             self.optimizer.zero_grad(set_to_none=True)
 
             # generate adversarial examples/intermediate adversarial examples
-            if adv:
-                if flip:
-                    images_adv, features_adv = self.adv_step(self.model, images, target, aux_branch=True)
-                else:
-                    if isinstance(self.model.module, SimpleViTDecoupledLN) or isinstance(self.model.module, MViTDecoupled) :
-                        self.model.module.make_adv()
-                    images_adv, features_adv = self.adv_step(self.model, images, target)
-            if fixed_dropout:
-                fixed_seed = ch.randint(0, 999999, size=(1,), device=images.device)
+            loss_dict = {}
+            nan_count = {}
             with autocast():
-                if sam:
-                    with self.model.no_sync():
-                        if fixed_dropout:
-                            ch.cuda.manual_seed(fixed_seed)
-                        output = self.model(images)
-                        loss_train = self.train_loss_func(output, target)
-                        loss_train.backward()
-                        #calculate norm of grad
-                        norm = 0
-                        for para in self.model.parameters():
-                            norm += (para.grad**2).sum()
-                        norm = norm**0.5
-                        for para in self.model.parameters():
-                            para.pert = para.grad/norm*radius
-                            para.data += para.pert
-                            para.grad = None
-                
-                if flip:
-                    output = self.model(images, aux_branch=True)
-                    loss_train_aux = self.train_loss_func(output, target)
-                    output = self.model(images+images_adv, feature_noise=features_adv, aux_branch=True)
-                    loss_train_aux_adv = self.train_loss_func(output, target)
-                    loss_train_aux = loss_train_aux_adv * adv_loss_weight + loss_train_aux * (1-adv_loss_weight)
-                    
-                    output = self.model(images, freeze_layers=freeze_layers)            
-                    loss_train = self.train_loss_func(output, target)
-                    loss_train += loss_train_aux
-                else:
-                    if split_layer:
-                        # use a different loss for clean examples when using two head model
-                        # clean loss through the auxilary branch
-                        output = self.model(images, aux_branch=True)
-                        loss_train_aux = self.train_loss_func(output, target)
-                        
-                        # clean loss through the main branch with freezing
-                        output_freeze = self.model(images, freeze_layers=freeze_layers)
-                        loss_train = self.train_loss_func(output_freeze, target)
-                    else:
-                        if isinstance(self.model.module, SimpleViTDecoupledLN) or isinstance(self.model.module, MViTDecoupled) :
-                            self.model.module.make_clean()
-                        output = self.model(images)
-                        loss_train = self.train_loss_func(output, target)
-                        if split_backward:
-                            # add dummy loss from parameters
-                            dummy_loss = 0
-                            for para in model.parameters():
-                                dummy_loss += para.sum()*0
-                            self.scaler.scale(loss_train*(1-adv_loss_weight)+dummy_loss).backward()
-                    if adv:
-                        if isinstance(self.model.module, SimpleViTDecoupledLN) or isinstance(self.model.module, MViTDecoupled) :
-                            self.model.module.make_adv()
-                        output_adv = self.model(images+images_adv, feature_noise=features_adv, freeze_layers=freeze_layers)
-                        loss_train_adv = self.train_adv_loss_func(output_adv, target)
-                        if split_backward:
-                            dummy_loss = 0
-                            for para in model.parameters():
-                                dummy_loss += para.sum()*0
-                            self.scaler.scale(loss_train_adv*(adv_loss_weight)+dummy_loss).backward()
-                        else:
-                            loss_train = loss_train_adv * adv_loss_weight + loss_train * (1-adv_loss_weight)
-                    if split_layer:
-                        loss_train += loss_train_aux
-            if not split_backward:
-                self.scaler.scale(loss_train).backward()
+                output, probe_output = self.model(images, get_features=True,  get_linear_probes=True)
+                # loss_train = self.train_loss_func(output, target)
+                loss_train = (output * 0).abs().sum()
+                for k, v in probe_output.items():
+                    # filter out any examples with nan output
+                    mask = ~v.isnan().any(dim=1)
+                    cur_loss =  self.train_loss_func(v[mask], target[mask])
+                    loss_train += cur_loss
+                    loss_dict[k] = cur_loss
+                    nan_count[k] = v.isnan().any(dim=1).sum()
+
+
+            self.scaler.scale(loss_train).backward()
             # Unscales the gradients of optimizer's assigned params in-place
             self.scaler.unscale_(self.optimizer)
 
             # Since the gradients of optimizer's assigned params are unscaled, clips as usual:
-            ch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
+            for probe in model.module.linear_probes:
+                ch.nn.utils.clip_grad_norm_(probe.parameters(), grad_clip_norm)
 
             self.scaler.step(self.optimizer)
             self.scaler.update()
-            if sam:
-                for i, para in enumerate(self.model.parameters()):
-                    para.data -= para.pert
                 
             ### Training end
 
@@ -643,6 +492,13 @@ class ImageNetTrainer:
                 if log_level > 1:
                     names += ['loss']
                     values += [f'{loss_train.item():.3f}']
+
+                    for k in probe_output:
+                        names += [f'loss_{k}']
+                        values += [f'{loss_dict[k].item():.3f}']
+                        names += [f'nan_{k}']
+                        values += [f'{nan_count[k].item():.3f}']
+
 
                 msg = ', '.join(f'{n}={v}' for n, v in zip(names, values))
                 iterator.set_description(msg)
@@ -679,8 +535,9 @@ class ImageNetTrainer:
                             else:
                                 para.count = ch.tensor([1], device=images.device)
                             para.grad = None
-                if ix == 100:
+                if ix == 10:
                     break
+            
             for i, para in enumerate(self.model.parameters()):
                 dist.all_reduce(para.gradmean, op=ReduceOp.SUM)
                 dist.all_reduce(para.gradsquaremean, op=ReduceOp.SUM)
@@ -689,9 +546,7 @@ class ImageNetTrainer:
                 para.gradsquaremean /= para.count
                 para.gradvar = para.gradsquaremean - para.gradmean ** 2
                 para.gsnr = (para.gradmean**2)/para.gradvar
-                del para.gradmean
-                del para.gradsquaremean
-                del para.count
+
                 delattr(para, 'gradmean')
                 delattr(para, 'gradsquaremean')
                 delattr(para, 'gradvar')
@@ -728,15 +583,12 @@ class ImageNetTrainer:
                     labels.append(target)
                     for key in features:
                         batch_size = len(output)
-                        feature_bank[key].append(features[key].view(batch_size, -1))
-                    if ix == 50:
-                        break
+                        feature_bank[key].append(features[key].mean(dim=1))
             labels = ch.cat(labels)
             # calculate distance matrix by layers
             acc_by_layers = [0]*len(feature_bank)
-            distance = ch.ones((len(labels), len(labels)), device=images.device)
-            for i in range(len(feature_bank)):
-                distance[:] = - float('inf') 
+            distance = ch.ones((len(labels), len(labels)))
+            for i in tqdm(range(len(feature_bank))):
                 vs = feature_bank[i]
                 b_size = len(vs[0])
                 for v in vs:
@@ -749,7 +601,8 @@ class ImageNetTrainer:
                 predictions = labels[knn.indices].mode(dim=1).values
                 acc = (predictions==labels).float().mean()
                 
-                dist.all_reduce(acc, op=ReduceOp.AVG)                
+                # dist.all_reduce(acc, op=ReduceOp.AVG)       
+                print(f"layer:{i} {acc.item()}")
                 acc_by_layers[i] = acc.item()
             # clean up
             del distance
@@ -764,17 +617,17 @@ class ImageNetTrainer:
     def val_loop(self, lr_tta):
         model = self.model
         model.eval()
-        if isinstance(self.model.module, SimpleViTDecoupledLN) or isinstance(self.model.module, MViTDecoupled) :
-            self.model.module.make_clean()
         with ch.no_grad():
             with autocast():
                 for images, target in tqdm(self.val_loader):
-                    output = self.model(images)
+                    output, linear_probes = self.model(images, get_features=True, get_linear_probes=True)
                     if lr_tta:
                         output += self.model(ch.flip(images, dims=[3]))
-
                     for k in ['top_1', 'top_5']:
                         self.val_meters[k](output, target)
+                    for k, v in linear_probes.items():
+                        self.val_meters[f'top_1_{k}'](v, target)
+                    
 
                     loss_val = self.test_loss_func(output, target)
                     self.val_meters['loss'](loss_val)
@@ -784,14 +637,21 @@ class ImageNetTrainer:
         return stats
 
     @param('logging.folder')
-    def initialize_logger(self, folder):
+    @param('model.arch')
+    def initialize_logger(self, folder, arch):
         self.val_meters = {
             'top_1': torchmetrics.Accuracy(compute_on_step=False).to(self.gpu),
             'top_5': torchmetrics.Accuracy(compute_on_step=False, top_k=5).to(self.gpu),
             'loss': MeanScalarMetric(compute_on_step=False).to(self.gpu)
         }
+        if arch == 'vit_s':
+            for i in range(12):
+                self.val_meters[f'top_1_{i}'] = torchmetrics.Accuracy(compute_on_step=False).to(self.gpu)
+        elif arch == 'mvit':
+            for i in range(10):
+                self.val_meters[f'top_1_{i}'] = torchmetrics.Accuracy(compute_on_step=False).to(self.gpu)
 
-        if self.rank == 0:
+        if self.gpu == 0:
             folder = (Path(folder) / str(self.uid)).absolute()
             folder.mkdir(parents=True)
 
@@ -808,7 +668,7 @@ class ImageNetTrainer:
 
     def log(self, content):
         print(f'=> Log: {content}')
-        if self.rank != 0: return
+        if self.gpu != 0: return
         cur_time = time.time()
         with open(self.log_folder / 'log', 'a+') as fd:
             fd.write(json.dumps({
@@ -821,16 +681,9 @@ class ImageNetTrainer:
     @classmethod
     @param('training.distributed')
     @param('dist.world_size')
-    @param('dist.multinode')
-    def launch_from_args(cls, distributed, world_size, multinode=False):
+    def launch_from_args(cls, distributed, world_size):
         if distributed:
-            if multinode:
-                # if using multinode mode, slurm will spawn the needed jobs, but each process needs ot get the rnak from process id
-                rank = os.environ['SLURM_PROCID']
-                print(f"executing program for rank {rank}")
-                cls.exec(rank=int(rank))
-            else:
-                ch.multiprocessing.spawn(cls._exec_wrapper, nprocs=world_size, join=True)
+            ch.multiprocessing.spawn(cls._exec_wrapper, nprocs=world_size, join=True)
         else:
             cls.exec(0)
 
@@ -842,8 +695,8 @@ class ImageNetTrainer:
     @classmethod
     @param('training.distributed')
     @param('training.eval_only')
-    def exec(cls, rank, distributed, eval_only):
-        trainer = cls(rank=rank)
+    def exec(cls, gpu, distributed, eval_only):
+        trainer = cls(gpu=gpu)
         if eval_only:
             trainer.eval_and_log()
         else:
