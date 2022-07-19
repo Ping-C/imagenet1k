@@ -5,9 +5,9 @@
 
 # Lines that begin with #SBATCH specify commands to be used by SLURM for scheduling
 #SBATCH --job-name=train                                # sets the job name if not set from environment
-#SBATCH --array=60-63                        # Submit 8 array jobs, throttling to 4 at a time
-#SBATCH --output logs/mvitmixup_%A_%a.log                            # indicates a file to redirect STDOUT to; %j is the jobid, _%A_%a is array task id
-#SBATCH --error logs/mvitmixup_%A_%a.log                             # indicates a file to redirect STDERR to; %j is the jobid,_%A_%a is array task id
+#SBATCH --array=64-68                        # Submit 8 array jobs, throttling to 4 at a time
+#SBATCH --output logs/triple_%A_%a.log                            # indicates a file to redirect STDOUT to; %j is the jobid, _%A_%a is array task id
+#SBATCH --error logs/triple_%A_%a.log                             # indicates a file to redirect STDERR to; %j is the jobid,_%A_%a is array task id
 #SBATCH --time=24:00:00                                         # how long you think your job will take to complete; format=hh:mm:ss
 #SBATCH --gres=gpu:8
 #SBATCH --account=all
@@ -140,7 +140,11 @@ command_list[61]="python train_imagenet.py --config-file configs/mvit_decoupled/
 command_list[62]="python train_imagenet.py --config-file configs/mvit_decoupled/mvits_100cls_advinput_decoupled.yaml --training.mixup=1 --training.epochs=300 --adv.radius_input=0.100 --adv.step_size_input=0.100 --logging.folder outputs/mvits_decoupled_mixup/mvits_imagenet100_advinput0.100_decoupled --dist.port=$MASTER_PORT"
 command_list[63]="python train_imagenet.py --config-file configs/mvit_decoupled/mvits_100cls_advinput_decoupled.yaml --training.mixup=1 --training.epochs=300 --adv.radius_input=0.150 --adv.step_size_input=0.150 --logging.folder outputs/mvits_decoupled_mixup/mvits_imagenet100_advinput0.150_decoupled --dist.port=$MASTER_PORT"
 
-
+command_list[64]="python train_imagenet.py --config-file configs/vit_100cls_advinput_triple.yaml --adv.radius_input=0.01 --adv.step_size_input=0.01 --logging.folder output/nomixup_v3/vit_advinput0.01_triple --dist.port=$MASTER_PORT"
+command_list[65]="python train_imagenet.py --config-file configs/vit_100cls_advinput_triple.yaml --adv.radius_input=0.02 --adv.step_size_input=0.02 --logging.folder output/nomixup_v3/vit_advinput0.02_triple --dist.port=$MASTER_PORT"
+command_list[66]="python train_imagenet.py --config-file configs/vit_100cls_advinput_triple.yaml --adv.radius_input=0.05 --adv.step_size_input=0.05 --logging.folder output/nomixup_v3/vit_advinput0.05_triple --dist.port=$MASTER_PORT"
+command_list[67]="python train_imagenet.py --config-file configs/vit_100cls_advinput_triple.yaml --adv.radius_input=0.10 --adv.step_size_input=0.10 --logging.folder output/nomixup_v3/vit_advinput0.10_triple --dist.port=$MASTER_PORT"
+command_list[68]="python train_imagenet.py --config-file configs/vit_100cls_advinput_triple.yaml --adv.radius_input=0.20 --adv.step_size_input=0.20 --logging.folder output/nomixup_v3/vit_advinput0.10_triple --dist.port=$MASTER_PORT"
 cur_command=${command_list[SLURM_ARRAY_TASK_ID]}
 echo $cur_command
 eval "$cur_command"

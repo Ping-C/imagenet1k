@@ -1,20 +1,20 @@
 data:
   in_memory: 1
-  num_workers: 4
-  num_classes: 1000
-  train_dataset: /data/home/pingchiang/data/imagenet_ffcv/train_400_0.1_90.ffcv
-  val_dataset: /data/home/pingchiang/data/imagenet_ffcv/val_400_0.1_90.ffcv
+  num_workers: 12
+  num_classes: 100
+  train_dataset: /fsx/pingchiang/imagenet_ffcv_100class/train_400_0.1_90.ffcv
+  val_dataset: /fsx/pingchiang/imagenet_ffcv_100class/val_400_0.1_90.ffcv
 dist:
   world_size: 8
 logging:
-  folder: ./outputs/mvitb/baseline
+  folder: ./outputs/vit_imagenet100_advinput0.01
   log_level: 2
 lr:
-  lr: 0.002
+  lr: 0.001
   lr_schedule_type: cyclic_warm
-  warmup_epochs: 70
+  warmup_epochs: 9
 model:
-  arch: mvit_s_decoupled
+  arch: vit_s_triple
 resolution:
   end_ramp: 13
   max_res: 224
@@ -29,15 +29,14 @@ training:
   momentum: 0.9
   optimizer: adamw
   grad_clip_norm: 1.0
-  weight_decay: 0.05
+  weight_decay: 0.0001
   use_blurpool: 1
-  mixup: 1
+  mixup: 0
 adv:
   num_steps: 1
   radius_input: 0.01
   step_size_input: 0.01
   adv_loss_weight: 0.5
-  split_backward: 1
 validation:
   batch_size: 64
   lr_tta: true

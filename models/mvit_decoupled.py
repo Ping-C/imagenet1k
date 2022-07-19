@@ -31,15 +31,20 @@ class LayerNormDecoupled(nn.Module):
         self.layernorm_clean = nn.LayerNorm(dim, **kwargs)
         self.layernorm_adv = nn.LayerNorm(dim, **kwargs)
         self.clean = True
+        self.factor = 1
     def forward(self, x):
         if self.clean:
             return self.layernorm_clean(x)
         else:
-            return self.layernorm_adv(x)
+            if self.factor == 1:
+                return self.layernorm_adv(x)
+            else:
+                return self.layernorm_adv(x)*self.factor + self.layernorm_clean(x)*(1-self.factor)
     def make_clean(self):
         self.clean = True
-    def make_adv(self):
+    def make_adv(self, factor=1):
         self.clean = False
+        self.factor = factor
 
 class Mlp(nn.Module):
     def __init__(
@@ -800,6 +805,16 @@ class MViTDecoupled(nn.Module):
         for module in self.modules():
             if isinstance(module, LayerNormDecoupled):
                 module.make_adv()
+    def freeze_nonlayernorm(self):
+        for para in self.parameters():
+            para.requires_grad_(False)
+        for module in self.modules():
+            if isinstance(module, LayerNormDecoupled):
+                for para in module.parameters():
+                    para.requires_grad_()
+    def unfreeze_nonlayernorm(self):
+        for para in self.parameters():
+            para.requires_grad_()
                 
 
 def _prepare_mvit_configs(cfg):

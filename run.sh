@@ -136,11 +136,29 @@
 # bash slurm_train.sh a100 advi --config-file configs/vit_100cls_advinput.yaml --training.mixup=0 --training.epochs 300 --adv.radius=$r --logging.folder=./outputs/nomixup_v3/vit_imagenet100_advinput$r &> logs/vit100nomixup_v3_advinput${r}.log &
 # done
 
-for r in 0.001 0.002 0.002
-do
-for l in 3 7 11 
-do
-adv_features='{"'"$l"'":{"radius":'"$r"',"step_size":'"$r"'}}'
-bash slurm_train.sh a100 advf --config-file configs/vit_100cls_advfeature.yaml --training.mixup=0 --training.epochs 300  --adv.adv_features=$adv_features --logging.folder=./outputs/nomixup_v3/vit_imagenet100_advfeature${r}_l$l &> logs/vit100nomixup_v3_advfeature${r}_l${l}.log &
-done
-done
+# for r in 0.001 0.002 0.002
+# do
+# for l in 3 7 11 
+# do
+# adv_features='{"'"$l"'":{"radius":'"$r"',"step_size":'"$r"'}}'
+# bash slurm_train.sh a100 advf --config-file configs/vit_100cls_advfeature.yaml --training.mixup=0 --training.epochs 300  --adv.adv_features=$adv_features --logging.folder=./outputs/nomixup_v3/vit_imagenet100_advfeature${r}_l$l &> logs/vit100nomixup_v3_advfeature${r}_l${l}.log &
+# done
+# done
+
+# python train_imagenet.py --config-file outputs/mvit_decoupled_mixup_finetune/mvit_imagenet100_advfinetune0.01/f98a5bac-2945-494c-89f7-b2bb780abe02/params.json \
+# --logging.resume_id=f98a5bac-2945-494c-89f7-b2bb780abe02 --dist.multinode=0 --dist.world_size=8 \
+# --dist.address=localhost --model.arch mvit_decoupled --training.epochs 30 \
+# --adv.num_steps=1 --adv.radius_input=0.01 --adv.step_size_input=0.01 --adv.adv_loss_weight=0.5 \
+# --logging.convert=1 --logging.folder outputs/mvit_decoupled_mixup_finetune/mvit_imagenet100_advfinetune0.01 \
+# --lr.lr 0.0005 --lr.warmup_epochs 0 --training.freeze_nonlayernorm_epochs 10
+
+
+python train_imagenet.py --config-file outputs/nomixup_v3/vit_imagenet100/ab0b15c5-fd26-4fb9-a9c9-6fe01b447b21/params.json \
+--logging.resume_id=ab0b15c5-fd26-4fb9-a9c9-6fe01b447b21 \
+--logging.resume_checkpoint outputs/nomixup_v3/vit_imagenet100/ab0b15c5-fd26-4fb9-a9c9-6fe01b447b21/epoch299.pt \
+--dist.multinode=0 --dist.world_size=8 --dist.address=localhost \
+--model.arch vit_s_decoupled --adv.adv_loss_weight=0.5 \
+--adv.num_steps=1 --adv.radius_input=0.1 --adv.step_size_input=0.1 --logging.convert=1  --lr.warmup_epochs 0 \
+--logging.folder output_finetune/vit_advinput0.1ft_lr0.001_ep100_fz10 --lr.lr 0.001 --training.freeze_nonlayernorm_epochs 10 --training.epochs 100 
+
+# 

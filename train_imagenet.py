@@ -28,9 +28,11 @@ from fastargs.decorators import param
 from fastargs import Param, Section
 from fastargs.validation import And, OneOf
 from fastargs.validation import Checker
-from models import SimpleViTDecoupledLN, MViTDecoupled
+from models import SimpleViTDecoupledLN, MViTDecoupled, SimpleViTTripleLN
 import json
 import os
+from random import randrange
+
 class DictChecker(Checker):
     def check(self, value):
         return json.loads(value)
@@ -81,7 +83,9 @@ Section('logging', 'how to log stuff').params(
     folder=Param(str, 'log location', required=True),
     log_level=Param(int, '0 if only at end 1 otherwise', default=1), 
     save_checkpoint_interval=Param(int, 'intervals for saving checkpoints', default=5), 
-    resume_id=Param(str, 'resume id', default=None)
+    resume_id=Param(str, 'resume id', default=None), 
+    resume_checkpoint=Param(str, 'resume path for checkpoint', default=None),
+    convert=Param(int, 'whether to convert the model from regular model to decoupled model', default=0)
 )
 
 Section('validation', 'Validation parameters stuff').params(
@@ -102,7 +106,8 @@ Section('training', 'training hyper param stuff').params(
     fixed_dropout=Param(int, 'whether to use fixed dropout pattern when running sam', default=0),
     mixup=Param(int, 'mixup augmentation', default=0),
     distributed=Param(int, 'is distributed?', default=0),
-    use_blurpool=Param(int, 'use blurpool?', default=0)
+    use_blurpool=Param(int, 'use blurpool?', default=0),
+    freeze_nonlayernorm_epochs=Param(int, 'use blurpool?', default=None),
 )
 
 Section('adv', 'hyper parameter related to adversarial training').params(
@@ -115,7 +120,9 @@ Section('adv', 'hyper parameter related to adversarial training').params(
     freeze_layers=Param(int, 'number of layers to freeze when conducting adversarial training', default=None),
     split_layer=Param(int, 'the index of layer after which the model is split into two', default=None),
     flip=Param(int, 'the index of layer after which the model is split into two', default=0),
-    split_backward=Param(int, 'splitting two backward pass', default=0)
+    split_backward=Param(int, 'splitting two backward pass', default=0),
+    double_adv=Param(int, 'double adversarial examples', default=0),
+    cache_adv=Param(int, 'whether to use cache adv strategy', default=0)
 )
 Section('sam', 'hyper parameter related to sam training').params(
     radius=Param(float, 'adversarial radius'),
@@ -202,11 +209,13 @@ class BlurPoolConv2d(ch.nn.Module):
 class ImageNetTrainer:
     @param('training.distributed')
     @param('logging.resume_id')
-    def __init__(self, rank, distributed, resume_id = None):
+    @param('logging.convert')
+    @param('logging.resume_checkpoint')
+    def __init__(self, rank, distributed, resume_id = None, convert=False, resume_checkpoint=None):
         self.all_params = get_current_config()
         self.rank = rank
         self.gpu = self.rank % ch.cuda.device_count()
-        print("rank:", self.rank, "gpu:", self.gpu, 'DEVICECOUNT', ch.cuda.device_count())
+        print("rank:", self.rank, ",gpu:", self.gpu, ',device count:', ch.cuda.device_count())
         if resume_id is None:
             self.uid = str(uuid4())
         else:
@@ -220,29 +229,56 @@ class ImageNetTrainer:
         self.model, self.scaler = self.create_model_and_scaler()
         self.create_optimizer()
         self.initialize_logger()
-        if resume_id is not None:
+        if resume_id is not None or resume_checkpoint is not None:
             # traverse the folder and find the latest checkpoint
-            latest_epoch_ckpt_file = None
-            latest_epoch = -float('inf')
-            for file in os.listdir(self.log_folder):
-                if 'epoch' in file:
-                    epoch = int(file.replace('epoch', '').replace('.pt', ''))
-                    if epoch > latest_epoch:
-                        latest_epoch = epoch
-                        latest_epoch_ckpt_file = file
-            print(f"latest_epoch_path:{Path(self.log_folder)/latest_epoch_ckpt_file}")
-            checkpoint_dict = ch.load(Path(self.log_folder)/latest_epoch_ckpt_file)
+            if resume_checkpoint is None:
+                latest_epoch_ckpt_file = None
+                latest_epoch = -float('inf')
+                for file in os.listdir(self.log_folder):
+                    if 'epoch' in file:
+                        epoch = int(file.replace('epoch', '').replace('.pt', ''))
+                        if epoch > latest_epoch:
+                            latest_epoch = epoch
+                            latest_epoch_ckpt_file = file
+                ckpt_path = Path(self.log_folder)/latest_epoch_ckpt_file
+                
+            else:
+                ckpt_path = resume_checkpoint
+            
+            print(f"loaded checkpoint at :{ckpt_path}")
+            checkpoint_dict = ch.load(ckpt_path)
             if 'state_dict' in checkpoint_dict:
                 # load model, optimizer, starting epoch number
+                if convert:
+                    checkpoint_dict['state_dict'] = self.convert(checkpoint_dict['state_dict'])
                 self.model.load_state_dict(checkpoint_dict['state_dict'])
                 self.optimizer.load_state_dict(checkpoint_dict['optimizer'])
                 self.starting_epoch = checkpoint_dict['starting_epoch']
             else:
+                if convert:
+                    checkpoint_dict = self.convert(checkpoint_dict)
+                self.starting_epoch = 0
                 self.model.load_state_dict(checkpoint_dict)
         else:
             self.starting_epoch = 0
         
-
+    def convert(self, checkpoint_dict):
+        convert_dict = dict()
+        for k, v in checkpoint_dict.items():
+            if "norm" in k or '.net.0.' in k or '.linear_head.0.' in k:
+                name_list = k.split('.')
+                for i, name in enumerate(name_list):
+                    if 'norm' in name or (i-1>=0 and name_list[i-1] == 'net' and name == '0') or  (i-1>=0 and name_list[i-1] == 'linear_head' and name == '0') :
+                        break
+                name_list.insert(i+1, 'layernorm_clean')
+                clean_key = ".".join(name_list)
+                name_list[i+1] = 'layernorm_adv'
+                adv_key = ".".join(name_list)
+                convert_dict[clean_key] = v
+                convert_dict[adv_key] = v
+            else:
+                convert_dict[k] = v
+        return convert_dict
     @param('dist.address')
     @param('dist.port')
     @param('dist.world_size')
@@ -445,23 +481,26 @@ class ImageNetTrainer:
     @param('training.epochs')
     @param('logging.log_level')
     @param('logging.save_checkpoint_interval')
-    def train(self, epochs, log_level, save_checkpoint_interval):
+    @param('training.freeze_nonlayernorm_epochs')
+    def train(self, epochs, log_level, save_checkpoint_interval, freeze_nonlayernorm_epochs=None):
         for epoch in range(self.starting_epoch, epochs):
+            
             res = self.get_resolution(epoch)
             self.decoder.output_size = (res, res)
-            train_loss = self.train_loop(epoch)
+            if freeze_nonlayernorm_epochs is not None:
+                if epoch < freeze_nonlayernorm_epochs:
+                    train_loss, train_loss_adv = self.train_loop(epoch, freeze_nonlayernorm=True)
+                else:
+                    train_loss, train_loss_adv = self.train_loop(epoch, freeze_nonlayernorm=False)
+            else:
+                train_loss, train_loss_adv = self.train_loop(epoch)
 
             if log_level > 0:
-                if epoch % 10 == 0:
-                    extra_dict = {
-                        'train_loss': train_loss,
-                        'epoch': epoch
-                    }
-                else:
-                    extra_dict = {
-                        'train_loss': train_loss,
-                        'epoch': epoch
-                    }
+                extra_dict = {
+                    'train_loss': train_loss,
+                    'train_loss_adv': train_loss_adv,
+                    'epoch': epoch
+                }
 
                 self.eval_and_log(extra_dict)
             if self.rank == 0 and (epoch+1) % save_checkpoint_interval == 0:
@@ -566,10 +605,12 @@ class ImageNetTrainer:
     @param('adv.split_layer')
     @param('adv.flip')
     @param('adv.split_backward')
-    def train_loop(self, epoch, log_level, grad_clip_norm, num_steps=0, adv_loss_weight=0, radius=0, fixed_dropout=False, freeze_layers=None, split_layer=None, flip=False, split_backward=False):
+    @param('adv.double_adv')
+    def train_loop(self, epoch, log_level, grad_clip_norm, num_steps=0, adv_loss_weight=0, radius=0, fixed_dropout=False, freeze_layers=None, split_layer=None, flip=False, split_backward=False, double_adv=False, freeze_nonlayernorm=False):
         model = self.model
         model.train()
         losses = []
+        losses_adv = []
         adv = num_steps > 0
         sam = radius > 0
 
@@ -633,7 +674,7 @@ class ImageNetTrainer:
                         output_freeze = self.model(images, freeze_layers=freeze_layers)
                         loss_train = self.train_loss_func(output_freeze, target)
                     else:
-                        if isinstance(self.model.module, SimpleViTDecoupledLN) or isinstance(self.model.module, MViTDecoupled) :
+                        if isinstance(self.model.module, SimpleViTDecoupledLN) or isinstance(self.model.module, MViTDecoupled)  or isinstance(self.model.module, SimpleViTTripleLN)  :
                             self.model.module.make_clean()
                         output = self.model(images)
                         loss_train = self.train_loss_func(output, target)
@@ -646,21 +687,40 @@ class ImageNetTrainer:
                     if adv:
                         if isinstance(self.model.module, SimpleViTDecoupledLN) or isinstance(self.model.module, MViTDecoupled) :
                             self.model.module.make_adv()
-                        output_adv = self.model(images+images_adv, feature_noise=features_adv, freeze_layers=freeze_layers)
-                        loss_train_adv = self.train_adv_loss_func(output_adv, target)
+                        if double_adv:
+                            output_adv_1 = self.model(images+images_adv, feature_noise=features_adv, freeze_layers=freeze_layers)
+                            loss_train_adv_1 = self.train_adv_loss_func(output_adv_1, target)
+                            output_adv_2 = self.model(images+images_adv*2, feature_noise=features_adv, freeze_layers=freeze_layers)
+                            loss_train_adv_2 = self.train_adv_loss_func(output_adv_2, target)
+                            loss_train_adv = (loss_train_adv_1 + loss_train_adv_2)/2
+                        else:
+                            if isinstance(self.model.module, SimpleViTTripleLN):
+                                # random select between x1 and x2
+                                multiplier = randrange(1, 3)
+                                self.model.module.make_adv(idx=int(multiplier-1))
+                                images_adv *= multiplier
+                            output_adv = self.model(images+images_adv, feature_noise=features_adv, freeze_layers=freeze_layers)
+                            loss_train_adv = self.train_adv_loss_func(output_adv, target)
+                        dummy_loss = 0
+                        for para in model.parameters():
+                            dummy_loss += para.sum()*0
                         if split_backward:
-                            dummy_loss = 0
-                            for para in model.parameters():
-                                dummy_loss += para.sum()*0
                             self.scaler.scale(loss_train_adv*(adv_loss_weight)+dummy_loss).backward()
                         else:
-                            loss_train = loss_train_adv * adv_loss_weight + loss_train * (1-adv_loss_weight)
+                            loss_train = loss_train_adv * adv_loss_weight + loss_train * (1-adv_loss_weight) + dummy_loss
                     if split_layer:
                         loss_train += loss_train_aux
             if not split_backward:
                 self.scaler.scale(loss_train).backward()
             # Unscales the gradients of optimizer's assigned params in-place
             self.scaler.unscale_(self.optimizer)
+            if freeze_nonlayernorm:
+                for name, para in model.named_parameters():
+                    if 'norm' in name:
+                        pass
+                    else:
+                        para.grad.detach_()
+                        para.grad.zero_()
 
             # Since the gradients of optimizer's assigned params are unscaled, clips as usual:
             ch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
@@ -676,7 +736,7 @@ class ImageNetTrainer:
             ### Logging start
             if log_level > 0:
                 losses.append(loss_train.detach())
-
+                losses_adv.append(loss_train_adv.detach())
                 group_lrs = []
                 for _, group in enumerate(self.optimizer.param_groups):
                     group_lrs.append(f'{group["lr"]:.3f}')
@@ -690,7 +750,7 @@ class ImageNetTrainer:
                 msg = ', '.join(f'{n}={v}' for n, v in zip(names, values))
                 iterator.set_description(msg)
             ### Logging end
-        return (sum(losses)/len(losses)).item()
+        return (sum(losses)/len(losses)).item(), (sum(losses_adv)/len(losses_adv)).item()
 
     def gsnr(self):
         # return gsnr of each layers
@@ -810,31 +870,65 @@ class ImageNetTrainer:
         model.eval()
         stats = {}
         if layernorm_switch:
-            for l_i, layer in enumerate(self.model.module.blocks):
-                # switching a certain layer to adv layernorm
-                self.model.module.make_clean()
+            # for factor in np.linspace(0, 1, 11):
+            #     for l_i, layer in enumerate(self.model.module.blocks):
+            #         # switching a certain layer to adv layernorm
+            #         self.model.module.make_clean()
+            #         for module in layer.modules():
+            #             if isinstance(module, LayerNormDecoupled):
+            #                 module.make_adv(factor=factor)
+                    
+            #         with ch.no_grad():
+            #             with autocast():
+            #                 for images, target in tqdm(self.val_loader):
+            #                     output = self.model(images)
+            #                     if lr_tta:
+            #                         output += self.model(ch.flip(images, dims=[3]))
+
+            #                     for k in ['top_1', 'top_5']:
+            #                         self.val_meters[k](output, target)
+
+            #                     loss_val = self.test_loss_func(output, target)
+            #                     self.val_meters['loss'](loss_val)
+
+            #         stats = {f"{k}_adv{l_i}_f{factor}": m.compute().item() for k, m in self.val_meters.items()} | stats
+            #         [meter.reset() for meter in self.val_meters.values()]
+            
+            # greedy layernorm soup
+            
+            self.model.module.make_clean()
+           
+            best_acc = None
+            for l_i, layer in enumerate(self.model.module.blocks[::-1]):
+                best_factor_curlayer = 0
+                for factor in np.linspace(0, 1, 11):
+                    # switching a certain layer to adv layernorm
+                    for module in layer.modules():
+                        if isinstance(module, LayerNormDecoupled):
+                            module.make_adv(factor=factor)
+                    
+                    with ch.no_grad():
+                        with autocast():
+                            for images, target in tqdm(self.val_loader):
+                                output = self.model(images)
+                                if lr_tta:
+                                    output += self.model(ch.flip(images, dims=[3]))
+
+                                for k in ['top_1', 'top_5']:
+                                    self.val_meters[k](output, target)
+
+                                loss_val = self.test_loss_func(output, target)
+                                self.val_meters['loss'](loss_val)
+                    curr_acc = self.val_meters['top_1'].compute().item()
+
+                    [meter.reset() for meter in self.val_meters.values()]
+                    if best_acc is None or curr_acc > best_acc:
+                        best_acc = curr_acc
+                        best_factor_curlayer = factor
                 for module in layer.modules():
                     if isinstance(module, LayerNormDecoupled):
-                        module.make_adv()
-                
-                with ch.no_grad():
-                    with autocast():
-                        for images, target in tqdm(self.val_loader):
-                            output = self.model(images)
-                            if lr_tta:
-                                output += self.model(ch.flip(images, dims=[3]))
+                        module.make_adv(factor=best_factor_curlayer)
 
-                            for k in ['top_1', 'top_5']:
-                                self.val_meters[k](output, target)
-
-                            loss_val = self.test_loss_func(output, target)
-                            self.val_meters['loss'](loss_val)
-
-                stats = {f"{k}_adv{l_i}": m.compute().item() for k, m in self.val_meters.items()} | stats
-                [meter.reset() for meter in self.val_meters.values()]
-            
-            # switching a certain layer to adv layernorm
-            self.model.module.make_adv()
             with ch.no_grad():
                 with autocast():
                     for images, target in tqdm(self.val_loader):
@@ -848,31 +942,48 @@ class ImageNetTrainer:
                         loss_val = self.test_loss_func(output, target)
                         self.val_meters['loss'](loss_val)
 
-            stats = {f"{k}_advall": m.compute().item() for k, m in self.val_meters.items()} | stats
+            stats = {f"{k}_greedy": m.compute().item() for k, m in self.val_meters.items()} | stats
             [meter.reset() for meter in self.val_meters.values()]
+            # switching a certain layer to adv layernorm
+            # self.model.module.make_adv()
+            # with ch.no_grad():
+            #     with autocast():
+            #         for images, target in tqdm(self.val_loader):
+            #             output = self.model(images)
+            #             if lr_tta:
+            #                 output += self.model(ch.flip(images, dims=[3]))
 
-            for l_i, layer in enumerate(self.model.module.blocks):
-                # switching a certain layer to adv layernorm
-                self.model.module.make_adv()
-                for module in layer.modules():
-                    if isinstance(module, LayerNormDecoupled):
-                        module.make_clean()
+            #             for k in ['top_1', 'top_5']:
+            #                 self.val_meters[k](output, target)
+
+            #             loss_val = self.test_loss_func(output, target)
+            #             self.val_meters['loss'](loss_val)
+
+            # stats = {f"{k}_advall": m.compute().item() for k, m in self.val_meters.items()} | stats
+            # [meter.reset() for meter in self.val_meters.values()]
+
+            # for l_i, layer in enumerate(self.model.module.blocks):
+            #     # switching a certain layer to adv layernorm
+            #     self.model.module.make_adv()
+            #     for module in layer.modules():
+            #         if isinstance(module, LayerNormDecoupled):
+            #             module.make_clean()
                 
-                with ch.no_grad():
-                    with autocast():
-                        for images, target in tqdm(self.val_loader):
-                            output = self.model(images)
-                            if lr_tta:
-                                output += self.model(ch.flip(images, dims=[3]))
+            #     with ch.no_grad():
+            #         with autocast():
+            #             for images, target in tqdm(self.val_loader):
+            #                 output = self.model(images)
+            #                 if lr_tta:
+            #                     output += self.model(ch.flip(images, dims=[3]))
 
-                            for k in ['top_1', 'top_5']:
-                                self.val_meters[k](output, target)
+            #                 for k in ['top_1', 'top_5']:
+            #                     self.val_meters[k](output, target)
 
-                            loss_val = self.test_loss_func(output, target)
-                            self.val_meters['loss'](loss_val)
+            #                 loss_val = self.test_loss_func(output, target)
+            #                 self.val_meters['loss'](loss_val)
 
-                stats = {f"{k}_clean{l_i}": m.compute().item() for k, m in self.val_meters.items()} | stats
-                [meter.reset() for meter in self.val_meters.values()]
+            #     stats = {f"{k}_clean{l_i}": m.compute().item() for k, m in self.val_meters.items()} | stats
+            #     [meter.reset() for meter in self.val_meters.values()]
         if isinstance(self.model.module, SimpleViTDecoupledLN) or isinstance(self.model.module, MViTDecoupled) :
             self.model.module.make_clean()
         with ch.no_grad():
