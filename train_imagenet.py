@@ -118,11 +118,8 @@ Section('adv', 'hyper parameter related to adversarial training').params(
     adv_loss_weight=Param(float, 'weight assigned to adversarial loss'),
     adv_loss_smooth=Param(float, 'weight assigned to adversarial loss'),
     freeze_layers=Param(int, 'number of layers to freeze when conducting adversarial training', default=None),
-    split_layer=Param(int, 'the index of layer after which the model is split into two', default=None),
-    flip=Param(int, 'the index of layer after which the model is split into two', default=0),
     split_backward=Param(int, 'splitting two backward pass', default=0),
-    double_adv=Param(int, 'double adversarial examples', default=0),
-    cache_adv=Param(int, 'whether to use cache adv strategy', default=0)
+    adv_cache=Param(int, 'whether to use cache adv strategy', default=0)
 )
 Section('sam', 'hyper parameter related to sam training').params(
     radius=Param(float, 'adversarial radius'),
@@ -539,10 +536,9 @@ class ImageNetTrainer:
     @param('training.distributed')
     @param('training.use_blurpool')
     @param('data.num_classes')
-    @param('adv.split_layer')
-    def create_model_and_scaler(self, arch, pretrained, distributed, use_blurpool, num_classes, split_layer=None):
+    def create_model_and_scaler(self, arch, pretrained, distributed, use_blurpool, num_classes):
         scaler = GradScaler()
-        model = models.get_arch(arch, num_classes=num_classes, split_layer=split_layer)
+        model = models.get_arch(arch, num_classes=num_classes)
         def apply_blurpool(mod: ch.nn.Module):
             for (name, child) in mod.named_children():
                 if isinstance(child, ch.nn.Conv2d) and (np.max(child.stride) > 1 and child.in_channels >= 16): 
@@ -564,8 +560,13 @@ class ImageNetTrainer:
     @param('adv.radius_input')
     @param('adv.step_size_input')
     @param('adv.adv_features')
+    @param('adv.adv_cache')
     def adv_step(self, model, images, target,
-        num_steps=None, step_size_input=None, radius_input=None, adv_features=None, aux_branch=False):
+        num_steps=None, step_size_input=None, radius_input=None, adv_features=None, aux_branch=False, adv_cache=False):
+        # if adv_cache:
+        #     st_idx = self.adv_cache_idx
+        #     end_idx = self.adv_cache_idx + len(images)
+        #     return self.adv_cache_images[st_idx: end_idx].cuda(), self.adv_cache_labels[st_idx: end_idx]
         input_adv_noise = ch.zeros_like(images, requires_grad=True)
         feature_adv_noise = FeatureNoise({int(layer): None for layer in adv_features} if adv_features is not None else {})
         for step in range(num_steps):
@@ -602,11 +603,9 @@ class ImageNetTrainer:
     @param('adv.freeze_layers')
     @param('sam.radius')
     @param('training.fixed_dropout')
-    @param('adv.split_layer')
-    @param('adv.flip')
     @param('adv.split_backward')
-    @param('adv.double_adv')
-    def train_loop(self, epoch, log_level, grad_clip_norm, num_steps=0, adv_loss_weight=0, radius=0, fixed_dropout=False, freeze_layers=None, split_layer=None, flip=False, split_backward=False, double_adv=False, freeze_nonlayernorm=False):
+    @param('adv.adv_cache')
+    def train_loop(self, epoch, log_level, grad_clip_norm, num_steps=0, adv_loss_weight=0, radius=0, fixed_dropout=False, freeze_layers=None, split_backward=False, freeze_nonlayernorm=False, adv_cache=False): 
         model = self.model
         model.train()
         losses = []
@@ -627,12 +626,9 @@ class ImageNetTrainer:
 
             # generate adversarial examples/intermediate adversarial examples
             if adv:
-                if flip:
-                    images_adv, features_adv = self.adv_step(self.model, images, target, aux_branch=True)
-                else:
-                    if isinstance(self.model.module, SimpleViTDecoupledLN) or isinstance(self.model.module, MViTDecoupled) :
-                        self.model.module.make_adv()
-                    images_adv, features_adv = self.adv_step(self.model, images, target)
+                if isinstance(self.model.module, SimpleViTDecoupledLN) or isinstance(self.model.module, MViTDecoupled) :
+                    self.model.module.make_adv()
+                images_adv, features_adv = self.adv_step(self.model, images, target)
             if fixed_dropout:
                 fixed_seed = ch.randint(0, 999999, size=(1,), device=images.device)
             with autocast():
@@ -653,63 +649,27 @@ class ImageNetTrainer:
                             para.data += para.pert
                             para.grad = None
                 
-                if flip:
-                    output = self.model(images, aux_branch=True)
-                    loss_train_aux = self.train_loss_func(output, target)
-                    output = self.model(images+images_adv, feature_noise=features_adv, aux_branch=True)
-                    loss_train_aux_adv = self.train_loss_func(output, target)
-                    loss_train_aux = loss_train_aux_adv * adv_loss_weight + loss_train_aux * (1-adv_loss_weight)
+                if isinstance(self.model.module, SimpleViTDecoupledLN) or isinstance(self.model.module, MViTDecoupled)  or isinstance(self.model.module, SimpleViTTripleLN)  :
+                    self.model.module.make_clean()
+                output = self.model(images)
+                loss_train = self.train_loss_func(output, target)
+                if split_backward:
+                    # add dummy loss from parameters
+                    dummy_loss = sum([para.sum()*0 for para in model.parameters()])
+                    self.scaler.scale(loss_train*(1-adv_loss_weight)+dummy_loss).backward()
+                
+                if adv:
+                    if isinstance(self.model.module, SimpleViTDecoupledLN) or isinstance(self.model.module, MViTDecoupled) :
+                        self.model.module.make_adv()
                     
-                    output = self.model(images, freeze_layers=freeze_layers)            
-                    loss_train = self.train_loss_func(output, target)
-                    loss_train += loss_train_aux
-                else:
-                    if split_layer:
-                        # use a different loss for clean examples when using two head model
-                        # clean loss through the auxilary branch
-                        output = self.model(images, aux_branch=True)
-                        loss_train_aux = self.train_loss_func(output, target)
-                        
-                        # clean loss through the main branch with freezing
-                        output_freeze = self.model(images, freeze_layers=freeze_layers)
-                        loss_train = self.train_loss_func(output_freeze, target)
+                    output_adv = self.model(images+images_adv, feature_noise=features_adv, freeze_layers=freeze_layers)
+                    loss_train_adv = self.train_adv_loss_func(output_adv, target)
+                    dummy_loss = sum([para.sum()*0 for para in model.parameters()])
+                    if split_backward:
+                        self.scaler.scale(loss_train_adv*(adv_loss_weight)+dummy_loss).backward()
                     else:
-                        if isinstance(self.model.module, SimpleViTDecoupledLN) or isinstance(self.model.module, MViTDecoupled)  or isinstance(self.model.module, SimpleViTTripleLN)  :
-                            self.model.module.make_clean()
-                        output = self.model(images)
-                        loss_train = self.train_loss_func(output, target)
-                        if split_backward:
-                            # add dummy loss from parameters
-                            dummy_loss = 0
-                            for para in model.parameters():
-                                dummy_loss += para.sum()*0
-                            self.scaler.scale(loss_train*(1-adv_loss_weight)+dummy_loss).backward()
-                    if adv:
-                        if isinstance(self.model.module, SimpleViTDecoupledLN) or isinstance(self.model.module, MViTDecoupled) :
-                            self.model.module.make_adv()
-                        if double_adv:
-                            output_adv_1 = self.model(images+images_adv, feature_noise=features_adv, freeze_layers=freeze_layers)
-                            loss_train_adv_1 = self.train_adv_loss_func(output_adv_1, target)
-                            output_adv_2 = self.model(images+images_adv*2, feature_noise=features_adv, freeze_layers=freeze_layers)
-                            loss_train_adv_2 = self.train_adv_loss_func(output_adv_2, target)
-                            loss_train_adv = (loss_train_adv_1 + loss_train_adv_2)/2
-                        else:
-                            if isinstance(self.model.module, SimpleViTTripleLN):
-                                # random select between x1 and x2
-                                multiplier = randrange(1, 3)
-                                self.model.module.make_adv(idx=int(multiplier-1))
-                                images_adv *= multiplier
-                            output_adv = self.model(images+images_adv, feature_noise=features_adv, freeze_layers=freeze_layers)
-                            loss_train_adv = self.train_adv_loss_func(output_adv, target)
-                        dummy_loss = 0
-                        for para in model.parameters():
-                            dummy_loss += para.sum()*0
-                        if split_backward:
-                            self.scaler.scale(loss_train_adv*(adv_loss_weight)+dummy_loss).backward()
-                        else:
-                            loss_train = loss_train_adv * adv_loss_weight + loss_train * (1-adv_loss_weight) + dummy_loss
-                    if split_layer:
-                        loss_train += loss_train_aux
+                        loss_train = loss_train_adv * adv_loss_weight + loss_train * (1-adv_loss_weight) + dummy_loss
+  
             if not split_backward:
                 self.scaler.scale(loss_train).backward()
             # Unscales the gradients of optimizer's assigned params in-place
