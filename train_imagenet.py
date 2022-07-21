@@ -119,7 +119,9 @@ Section('adv', 'hyper parameter related to adversarial training').params(
     adv_loss_smooth=Param(float, 'weight assigned to adversarial loss'),
     freeze_layers=Param(int, 'number of layers to freeze when conducting adversarial training', default=None),
     split_backward=Param(int, 'splitting two backward pass', default=0),
-    adv_cache=Param(int, 'whether to use cache adv strategy', default=0)
+    adv_cache=Param(int, 'whether to use cache adv strategy', default=0),
+    cache_frequency=Param(int, 'whether to use cache adv strategy', default=1),
+    cache_size_multiplier=Param(float, 'how large is the cached noise relative to the batch size', default=1)
 )
 Section('sam', 'hyper parameter related to sam training').params(
     radius=Param(float, 'adversarial radius'),
@@ -556,6 +558,35 @@ class ImageNetTrainer:
         return model, scaler
     
 
+    @param('adv.radius_input')
+    @param('adv.step_size_input')
+    @param('adv.cache_frequency')
+    @param('adv.cache_size_multiplier')
+    def adv_cache(self, images, step_size_input=None, radius_input=None, cache_frequency=1, cache_size_multiplier=1):
+        
+        b_size = images.shape[0]
+        if not hasattr(self, 'adv_cache_noise'):
+            self.adv_cache_noise = ch.zeros((int(b_size*cache_size_multiplier), *images.shape[1:]), device=images.device, dtype=images.dtype)
+            self.adv_cache_noise.requires_grad_(True)
+            self.adv_cache_iter = 0
+        else:
+            self.adv_cache_iter = (self.adv_cache_iter + 1)%cache_frequency 
+            if self.adv_cache_iter == 0:
+                # take an adversarial step
+                grad = self.adv_cache_noise.grad
+                self.adv_cache_noise.data += grad.sign() * step_size_input
+                self.adv_cache_noise.data.clamp_(-radius_input, +radius_input)
+                self.adv_cache_noise.grad = None
+            else:
+                self.adv_cache_noise.grad = None
+        if cache_size_multiplier == 1:
+            return self.adv_cache_noise, FeatureNoise({})
+        elif cache_size_multiplier > 1:
+            idx = ch.randperm(len(self.adv_cache_noise))[:b_size]
+            return self.adv_cache_noise[idx], FeatureNoise({})
+        elif cache_size_multiplier < 1:
+            return self.adv_cache_noise.repeat(int(1/cache_size_multiplier), 1, 1, 1), FeatureNoise({})
+
     @param('adv.num_steps')
     @param('adv.radius_input')
     @param('adv.step_size_input')
@@ -563,10 +594,8 @@ class ImageNetTrainer:
     @param('adv.adv_cache')
     def adv_step(self, model, images, target,
         num_steps=None, step_size_input=None, radius_input=None, adv_features=None, aux_branch=False, adv_cache=False):
-        # if adv_cache:
-        #     st_idx = self.adv_cache_idx
-        #     end_idx = self.adv_cache_idx + len(images)
-        #     return self.adv_cache_images[st_idx: end_idx].cuda(), self.adv_cache_labels[st_idx: end_idx]
+        if adv_cache:
+            return self.adv_cache(images)
         input_adv_noise = ch.zeros_like(images, requires_grad=True)
         feature_adv_noise = FeatureNoise({int(layer): None for layer in adv_features} if adv_features is not None else {})
         for step in range(num_steps):
@@ -604,8 +633,7 @@ class ImageNetTrainer:
     @param('sam.radius')
     @param('training.fixed_dropout')
     @param('adv.split_backward')
-    @param('adv.adv_cache')
-    def train_loop(self, epoch, log_level, grad_clip_norm, num_steps=0, adv_loss_weight=0, radius=0, fixed_dropout=False, freeze_layers=None, split_backward=False, freeze_nonlayernorm=False, adv_cache=False): 
+    def train_loop(self, epoch, log_level, grad_clip_norm, num_steps=0, adv_loss_weight=0, radius=0, fixed_dropout=False, freeze_layers=None, split_backward=False, freeze_nonlayernorm=False): 
         model = self.model
         model.train()
         losses = []

@@ -5,7 +5,7 @@
 
 # Lines that begin with #SBATCH specify commands to be used by SLURM for scheduling
 #SBATCH --job-name=train                                # sets the job name if not set from environment
-#SBATCH --array=20-25                       # Submit 8 array jobs, throttling to 4 at a time
+#SBATCH --array=21,25                       # Submit 8 array jobs, throttling to 4 at a time
 #SBATCH --output logs/imgnt1k_requeuev2_%A_%a.log                            # indicates a file to redirect STDOUT to; %j is the jobid, _%A_%a is array task id
 #SBATCH --error logs/imgnt1k_requeuev2_%A_%a.log                             # indicates a file to redirect STDERR to; %j is the jobid,_%A_%a is array task id
 #SBATCH --account=all
