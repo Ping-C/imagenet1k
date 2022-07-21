@@ -32,6 +32,7 @@ from models import SimpleViTDecoupledLN, MViTDecoupled, SimpleViTTripleLN
 import json
 import os
 from random import randrange
+import wandb
 
 class DictChecker(Checker):
     def check(self, value):
@@ -85,7 +86,8 @@ Section('logging', 'how to log stuff').params(
     save_checkpoint_interval=Param(int, 'intervals for saving checkpoints', default=5), 
     resume_id=Param(str, 'resume id', default=None), 
     resume_checkpoint=Param(str, 'resume path for checkpoint', default=None),
-    convert=Param(int, 'whether to convert the model from regular model to decoupled model', default=0)
+    convert=Param(int, 'whether to convert the model from regular model to decoupled model', default=0),
+    usewb=Param(int, 'whether to use weight and bias', default=1)
 )
 
 Section('validation', 'Validation parameters stuff').params(
@@ -210,10 +212,13 @@ class ImageNetTrainer:
     @param('logging.resume_id')
     @param('logging.convert')
     @param('logging.resume_checkpoint')
-    def __init__(self, rank, distributed, resume_id = None, convert=False, resume_checkpoint=None):
+    @param('logging.usewb')
+    def __init__(self, rank, distributed, resume_id = None, convert=False, resume_checkpoint=None, usewb=False):
         self.all_params = get_current_config()
         self.rank = rank
         self.gpu = self.rank % ch.cuda.device_count()
+
+
         print("rank:", self.rank, ",gpu:", self.gpu, ',device count:', ch.cuda.device_count())
         if resume_id is None:
             self.uid = str(uuid4())
@@ -260,7 +265,15 @@ class ImageNetTrainer:
                 self.model.load_state_dict(checkpoint_dict)
         else:
             self.starting_epoch = 0
-        
+        if rank == 0:
+            if resume_id:
+                wandb.init(project="cache-advprop", entity="pchiang", name=os.path.normpath(self.log_folder).split("/")[-2], resume=True, id=self.uid)
+            else:
+                wandb.init(project="cache-advprop", entity="pchiang", name=os.path.normpath(self.log_folder).split("/")[-2], id=self.uid)
+            wandb.config = {'.'.join(k): self.all_params[k] for k in self.all_params.entries.keys()}
+            self.usewb = True
+        else:
+            self.usewb = False
     def convert(self, checkpoint_dict):
         convert_dict = dict()
         for k, v in checkpoint_dict.items():
@@ -530,6 +543,11 @@ class ImageNetTrainer:
                 'current_lr': self.optimizer.param_groups[0]['lr'],\
                 'val_time': val_time
             }, **extra_dict, **stats))
+            if self.usewb:
+                wandb.log(dict({
+                'current_lr': self.optimizer.param_groups[0]['lr'],\
+                'val_time': val_time
+            }, **extra_dict, **stats), step=extra_dict['epoch'])
 
         return stats
 
@@ -697,6 +715,8 @@ class ImageNetTrainer:
                         self.scaler.scale(loss_train_adv*(adv_loss_weight)+dummy_loss).backward()
                     else:
                         loss_train = loss_train_adv * adv_loss_weight + loss_train * (1-adv_loss_weight) + dummy_loss
+                else:
+                    loss_train_adv= ch.tensor(0)
   
             if not split_backward:
                 self.scaler.scale(loss_train).backward()
