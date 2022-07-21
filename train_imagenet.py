@@ -760,116 +760,6 @@ class ImageNetTrainer:
             ### Logging end
         return (sum(losses)/len(losses)).item(), (sum(losses_adv)/len(losses_adv)).item()
 
-    def gsnr(self):
-        # return gsnr of each layers
-        # loop through a certain number of training examples
-        # backward with no sync
-        # calculate mean & square mean of gradient of each parameters
-        # aggregate the gsnr by layer
-        iterator = tqdm(self.train_loader)
-        with autocast():
-            for ix, (images, target) in enumerate(iterator):
-                for i in range(len(target)):
-                    image_cur = images[i:i+1]
-                    target_cur = target[i:i+1]
-                    with self.model.no_sync():
-                        output = self.model(image_cur)
-                        loss_train = self.train_loss_func(output, target_cur)
-                        loss_train.backward()
-                        for para in self.model.parameters():
-                            if hasattr(para, 'gradmean'):
-                                para.gradmean += para.grad
-                            else:
-                                para.gradmean = para.grad
-                            if hasattr(para, 'gradsquaremean'):
-                                para.gradsquaremean += para.grad ** 2
-                            else:
-                                para.gradsquaremean = para.grad ** 2
-                            if hasattr(para, 'count'):
-                                para.count += 1
-                            else:
-                                para.count = ch.tensor([1], device=images.device)
-                            para.grad = None
-                if ix == 100:
-                    break
-            for i, para in enumerate(self.model.parameters()):
-                dist.all_reduce(para.gradmean, op=ReduceOp.SUM)
-                dist.all_reduce(para.gradsquaremean, op=ReduceOp.SUM)
-                dist.all_reduce(para.count, op=ReduceOp.SUM)
-                para.gradmean /= para.count
-                para.gradsquaremean /= para.count
-                para.gradvar = para.gradsquaremean - para.gradmean ** 2
-                para.gsnr = (para.gradmean**2)/para.gradvar
-                del para.gradmean
-                del para.gradsquaremean
-                del para.count
-                delattr(para, 'gradmean')
-                delattr(para, 'gradsquaremean')
-                delattr(para, 'gradvar')
-            
-            gsnrs = []
-            for li, layer in enumerate(self.model.module.transformer.layers):
-                gsnr = None
-                count = None
-                for para in layer.parameters():
-                    if gsnr is None:
-                        gsnr = para.gsnr.sum()
-                        count = para.gsnr.numel()
-                    else:
-                        gsnr += para.gsnr.sum()
-                        count += para.gsnr.numel()
-                    del para.gsnr
-                    delattr(para, 'gsnr')
-                gsnr /= count
-                gsnrs.append(gsnr.detach().item())
-            return gsnrs
-
-    def knn(self):
-        # loop through certain number of training examples
-        # extract per layer features
-        # calculate the distance matrix
-        # calculate knn accuracy by layers
-        feature_bank = defaultdict(list)
-        labels = []
-        with ch.no_grad():
-            iterator = tqdm(self.train_loader)
-            with autocast():
-                for ix, (images, target) in enumerate(iterator):
-                    output, features = self.model(images, get_features=True)
-                    labels.append(target)
-                    for key in features:
-                        batch_size = len(output)
-                        feature_bank[key].append(features[key].view(batch_size, -1))
-                    if ix == 50:
-                        break
-            labels = ch.cat(labels)
-            # calculate distance matrix by layers
-            acc_by_layers = [0]*len(feature_bank)
-            distance = ch.ones((len(labels), len(labels)), device=images.device)
-            for i in range(len(feature_bank)):
-                distance[:] = - float('inf') 
-                vs = feature_bank[i]
-                b_size = len(vs[0])
-                for v in vs:
-                    v /= v.norm(dim=1, keepdim=True, p=2)
-                for v1_i, v1 in enumerate(vs):
-                    for v2_i, v2 in enumerate(vs):
-                        distance[v1_i*b_size:v1_i*b_size+b_size, v2_i*b_size:v2_i*b_size+b_size] = v1 @ v2.T
-                distance[ch.arange(len(distance)), ch.arange(len(distance))] = -float('inf')
-                knn = distance.topk(20, largest=True)
-                predictions = labels[knn.indices].mode(dim=1).values
-                acc = (predictions==labels).float().mean()
-                
-                dist.all_reduce(acc, op=ReduceOp.AVG)                
-                acc_by_layers[i] = acc.item()
-            # clean up
-            del distance
-            for i in range(len(feature_bank)):
-                for v in feature_bank[i]:
-                    del v
-                del feature_bank[i]
-            del feature_bank
-        return acc_by_layers
 
     @param('validation.lr_tta')
     @param('eval.layernorm_switch')
@@ -878,32 +768,31 @@ class ImageNetTrainer:
         model.eval()
         stats = {}
         if layernorm_switch:
-            # for factor in np.linspace(0, 1, 11):
-            #     for l_i, layer in enumerate(self.model.module.blocks):
-            #         # switching a certain layer to adv layernorm
-            #         self.model.module.make_clean()
-            #         for module in layer.modules():
-            #             if isinstance(module, LayerNormDecoupled):
-            #                 module.make_adv(factor=factor)
+            for factor in np.linspace(0, 1, 11):
+                for l_i, layer in enumerate(self.model.module.blocks):
+                    # switching a certain layer to adv layernorm
+                    self.model.module.make_clean()
+                    for module in layer.modules():
+                        if isinstance(module, LayerNormDecoupled):
+                            module.make_adv(factor=factor)
                     
-            #         with ch.no_grad():
-            #             with autocast():
-            #                 for images, target in tqdm(self.val_loader):
-            #                     output = self.model(images)
-            #                     if lr_tta:
-            #                         output += self.model(ch.flip(images, dims=[3]))
+                    with ch.no_grad():
+                        with autocast():
+                            for images, target in tqdm(self.val_loader):
+                                output = self.model(images)
+                                if lr_tta:
+                                    output += self.model(ch.flip(images, dims=[3]))
 
-            #                     for k in ['top_1', 'top_5']:
-            #                         self.val_meters[k](output, target)
+                                for k in ['top_1', 'top_5']:
+                                    self.val_meters[k](output, target)
 
-            #                     loss_val = self.test_loss_func(output, target)
-            #                     self.val_meters['loss'](loss_val)
+                                loss_val = self.test_loss_func(output, target)
+                                self.val_meters['loss'](loss_val)
 
-            #         stats = {f"{k}_adv{l_i}_f{factor}": m.compute().item() for k, m in self.val_meters.items()} | stats
-            #         [meter.reset() for meter in self.val_meters.values()]
+                    stats = {f"{k}_adv{l_i}_f{factor}": m.compute().item() for k, m in self.val_meters.items()} | stats
+                    [meter.reset() for meter in self.val_meters.values()]
             
             # greedy layernorm soup
-            
             self.model.module.make_clean()
            
             best_acc = None
@@ -952,46 +841,6 @@ class ImageNetTrainer:
 
             stats = {f"{k}_greedy": m.compute().item() for k, m in self.val_meters.items()} | stats
             [meter.reset() for meter in self.val_meters.values()]
-            # switching a certain layer to adv layernorm
-            # self.model.module.make_adv()
-            # with ch.no_grad():
-            #     with autocast():
-            #         for images, target in tqdm(self.val_loader):
-            #             output = self.model(images)
-            #             if lr_tta:
-            #                 output += self.model(ch.flip(images, dims=[3]))
-
-            #             for k in ['top_1', 'top_5']:
-            #                 self.val_meters[k](output, target)
-
-            #             loss_val = self.test_loss_func(output, target)
-            #             self.val_meters['loss'](loss_val)
-
-            # stats = {f"{k}_advall": m.compute().item() for k, m in self.val_meters.items()} | stats
-            # [meter.reset() for meter in self.val_meters.values()]
-
-            # for l_i, layer in enumerate(self.model.module.blocks):
-            #     # switching a certain layer to adv layernorm
-            #     self.model.module.make_adv()
-            #     for module in layer.modules():
-            #         if isinstance(module, LayerNormDecoupled):
-            #             module.make_clean()
-                
-            #     with ch.no_grad():
-            #         with autocast():
-            #             for images, target in tqdm(self.val_loader):
-            #                 output = self.model(images)
-            #                 if lr_tta:
-            #                     output += self.model(ch.flip(images, dims=[3]))
-
-            #                 for k in ['top_1', 'top_5']:
-            #                     self.val_meters[k](output, target)
-
-            #                 loss_val = self.test_loss_func(output, target)
-            #                 self.val_meters['loss'](loss_val)
-
-            #     stats = {f"{k}_clean{l_i}": m.compute().item() for k, m in self.val_meters.items()} | stats
-            #     [meter.reset() for meter in self.val_meters.values()]
         if isinstance(self.model.module, SimpleViTDecoupledLN) or isinstance(self.model.module, MViTDecoupled) :
             self.model.module.make_clean()
         with ch.no_grad():
