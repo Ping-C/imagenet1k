@@ -4,17 +4,17 @@
 
 
 # Lines that begin with #SBATCH specify commands to be used by SLURM for scheduling
-#SBATCH --job-name=train                                # sets the job name if not set from environment
-#SBATCH --array=21,25                       # Submit 8 array jobs, throttling to 4 at a time
-#SBATCH --output logs/imgnt1k_requeuev2_%A_%a.log                            # indicates a file to redirect STDOUT to; %j is the jobid, _%A_%a is array task id
-#SBATCH --error logs/imgnt1k_requeuev2_%A_%a.log                             # indicates a file to redirect STDERR to; %j is the jobid,_%A_%a is array task id
+#SBATCH --job-name=img1k                                # sets the job name if not set from environment
+#SBATCH --array=29                       # Submit 8 array jobs, throttling to 4 at a time
+#SBATCH --output logs/imgnt1k_%A_%a.log                            # indicates a file to redirect STDOUT to; %j is the jobid, _%A_%a is array task id
+#SBATCH --error logs/imgnt1k_%A_%a.log                             # indicates a file to redirect STDERR to; %j is the jobid,_%A_%a is array task id
 #SBATCH --account=all
 #SBATCH --ntasks=16
 #SBATCH --gpus-per-task=1
 #SBATCH --cpus-per-task=4
 #SBATCH --partition=lowpri
 #SBATCH --nice=0                                              #positive means lower priority
-#SBATCH --exclude=a100-st-p4d24xlarge-280,a100-st-p4d24xlarge-49
+###SBATCH --exclude=a100-st-p4d24xlarge-280,a100-st-p4d24xlarge-49
 
 
 
@@ -70,6 +70,12 @@ command_list[23]="python train_imagenet.py --config-file outputs_requeue_v2/imgn
 command_list[24]="python train_imagenet.py --config-file outputs_requeue_v2/imgnt1k/decoupled_0.010/7949cf27-a6c7-49c0-98b5-715d630c834c/params.json  --dist.port=$MASTER_PORT --dist.address=$master_addr"
 command_list[25]="python train_imagenet.py --config-file outputs_requeue_v2/imgnt1k/decoupled_0.20/0b080854-2e11-4ee9-8f9b-0698a7b63781/params.json   --dist.port=$MASTER_PORT --dist.address=$master_addr"
 
+command_list[26]="python train_imagenet.py --config-file configs/mvit_decoupled/mvits_1000cls_baseline.yaml           --logging.project_name imgnt1K --logging.resume_id=aa                                                                                         --logging.folder outputs/imgnt1k/baseline                                --dist.world_size=$SLURM_NTASKS --dist.multinode=1 --dist.port=$MASTER_PORT --dist.address=$master_addr"
+command_list[27]="python train_imagenet.py --config-file configs/mvit_decoupled/mvits_1000cls_advinput_decoupled.yaml --logging.project_name imgnt1K --logging.resume_id=ab --adv.radius_input 0.20 --adv.step_size_input 0.020 --adv.num_steps 1 --adv.adv_cache=1 --logging.folder outputs_requeue_v2/imgnt1k/decoupled_r0.20_s0.020_cache --dist.world_size=$SLURM_NTASKS --dist.multinode=1 --dist.port=$MASTER_PORT --dist.address=$master_addr"
+command_list[28]="python train_imagenet.py --config-file configs/mvit_decoupled/mvits_1000cls_advinput_decoupled.yaml --logging.project_name imgnt1K --logging.resume_id=ac --adv.radius_input 0.30 --adv.step_size_input 0.030 --adv.num_steps 1 --adv.adv_cache=1 --logging.folder outputs_requeue_v2/imgnt1k/decoupled_r0.30_s0.030_cache --dist.world_size=$SLURM_NTASKS --dist.multinode=1 --dist.port=$MASTER_PORT --dist.address=$master_addr"
+command_list[29]="python train_imagenet.py --config-file configs/mvit_decoupled/mvits_1000cls_advinput_decoupled.yaml --logging.project_name imgnt1K --logging.resume_id=ad --adv.radius_input 0.02 --adv.step_size_input 0.007 --adv.num_steps 3                   --logging.folder outputs_requeue_v2/imgnt1k/decoupled_r0.02_s0.007c3     --dist.world_size=$SLURM_NTASKS --dist.multinode=1 --dist.port=$MASTER_PORT --dist.address=$master_addr"
+command_list[30]="python train_imagenet.py --config-file configs/mvit_decoupled/mvits_1000cls_advinput_decoupled.yaml --logging.project_name imgnt1K --logging.resume_id=ae --adv.radius_input 0.02 --adv.step_size_input 0.012 --adv.num_steps 2                   --logging.folder outputs_requeue_v2/imgnt1k/decoupled_r0.02_s0.012c2     --dist.world_size=$SLURM_NTASKS --dist.multinode=1 --dist.port=$MASTER_PORT --dist.address=$master_addr"
+command_list[31]="python train_imagenet.py --config-file configs/mvit_decoupled/mvits_1000cls_advinput_decoupled.yaml --logging.project_name imgnt1K --logging.resume_id=af --adv.radius_input 0.02 --adv.step_size_input 0.020 --adv.num_steps 1                   --logging.folder outputs_requeue_v2/imgnt1k/decoupled_r0.02_s0.020c1     --dist.world_size=$SLURM_NTASKS --dist.multinode=1 --dist.port=$MASTER_PORT --dist.address=$master_addr"
 
 # jobs for adversarial finetuning
 cur_command=${command_list[SLURM_ARRAY_TASK_ID]}

@@ -1,6 +1,6 @@
 data:
   in_memory: 1
-  num_workers: 12
+  num_workers: 4
   num_classes: 1000
   train_dataset: /data/home/pingchiang/data/imagenet_ffcv/train_500_0.50_90.ffcv
   val_dataset: /data/home/pingchiang/data/imagenet_ffcv/val_500_0.50_90.ffcv
@@ -14,7 +14,7 @@ lr:
   lr_schedule_type: cyclic_warm
   warmup_epochs: 9
 model:
-  arch: vit_s
+  arch: vit_b_decoupled
 resolution:
   end_ramp: 13
   max_res: 224
@@ -24,7 +24,7 @@ training:
   batch_size: 128
   bn_wd: 0
   distributed: 1
-  epochs: 90
+  epochs: 300
   label_smoothing: 0.1
   momentum: 0.9
   optimizer: adamw
@@ -32,6 +32,13 @@ training:
   weight_decay: 0.0001
   use_blurpool: 0
   mixup: 1
+adv:
+  num_steps: 1
+  radius_input: 0.2
+  step_size_input: 0.02
+  cache: 1
+  adv_loss_weight: 0.5
+  split_backward: 1
 validation:
   batch_size: 64
   lr_tta: true

@@ -33,6 +33,8 @@ import json
 import os
 from random import randrange
 import wandb
+from torchvision.models import ResNet
+from torchvision.utils import make_grid
 
 class DictChecker(Checker):
     def check(self, value):
@@ -74,7 +76,7 @@ Section('data', 'data related stuff').params(
 Section('lr', 'lr scheduling').params(
     step_ratio=Param(float, 'learning rate step ratio', default=0.1),
     step_length=Param(int, 'learning rate step length', default=30),
-    lr_schedule_type=Param(OneOf(['step', 'cyclic', 'cyclic_warm']), default='cyclic'),
+    lr_schedule_type=Param(str, default='cyclic'),
     lr=Param(float, 'learning rate', default=0.5),
     lr_peak_epoch=Param(int, 'Epoch at which LR peaks', default=2),
     warmup_epochs=Param(int, 'number of warmup steps', default=None),
@@ -87,7 +89,8 @@ Section('logging', 'how to log stuff').params(
     resume_id=Param(str, 'resume id', default=None), 
     resume_checkpoint=Param(str, 'resume path for checkpoint', default=None),
     convert=Param(int, 'whether to convert the model from regular model to decoupled model', default=0),
-    usewb=Param(int, 'whether to use weight and bias', default=1)
+    usewb=Param(int, 'whether to use weight and bias', default=1),
+    project_name=Param(str, 'project name for w&b', default="cache-advprop")
 )
 
 Section('validation', 'Validation parameters stuff').params(
@@ -115,15 +118,25 @@ Section('training', 'training hyper param stuff').params(
 Section('adv', 'hyper parameter related to adversarial training').params(
     num_steps=Param(int, 'number of adversarial steps'),
     radius_input=Param(float, 'adversarial radius'),
+    radius_schedule=Param(int, 'whether to vary the radius according to a schedule', default=0),
+    max_radius_multiplier=Param(float, 'maximum radius multiplier', default=1),
+    start_epoch=Param(int, 'epochs where one start to increase the radius'),
     step_size_input=Param(float, 'step size for adversarial step'),
     adv_features=Param(DictChecker(), 'attacked feature layers'),
     adv_loss_weight=Param(float, 'weight assigned to adversarial loss'),
+    adv_loss_even=Param(float, 'whether to assign the same adversarial loss to '),
     adv_loss_smooth=Param(float, 'weight assigned to adversarial loss'),
     freeze_layers=Param(int, 'number of layers to freeze when conducting adversarial training', default=None),
     split_backward=Param(int, 'splitting two backward pass', default=0),
     adv_cache=Param(int, 'whether to use cache adv strategy', default=0),
     cache_frequency=Param(int, 'whether to use cache adv strategy', default=1),
-    cache_size_multiplier=Param(float, 'how large is the cached noise relative to the batch size', default=1)
+    cache_size_multiplier=Param(float, 'how large is the cached noise relative to the batch size', default=1),
+    cache_sequential=Param(float, 'whether to update the cache sequentially or randomly when cache_size_multiplier is larger than 1', default=0),
+    cache_class_wise=Param(float, 'whether to use class wise universal perturbation', default=0),
+    cache_class_wise_shuffle_iter=Param(int, 'number of iterations to shuffle class wise adversaries'),
+    pyramid=Param(float, 'whether to use class wise universal perturbation', default=0),
+    optimizer=Param(str, 'optimizer used to optimizer the image'),
+    lr=Param(float, 'optimizer used to optimizer the image'),
 )
 Section('sam', 'hyper parameter related to sam training').params(
     radius=Param(float, 'adversarial radius'),
@@ -172,6 +185,34 @@ def get_step_lr(epoch, lr, step_ratio, step_length, epochs):
     num_steps = epoch // step_length
     return step_ratio**num_steps * lr
 
+@param('adv.max_radius_multiplier')
+@param('adv.start_epoch')
+@param('training.epochs')
+def get_radius_multiplier(epoch, start_epoch, max_radius_multiplier, epochs):
+    if epoch < start_epoch:
+        return 1
+    
+    return 1 + (epoch - start_epoch) / epochs * (max_radius_multiplier -1)
+
+@param('lr.lr')
+@param('lr.step_ratio')
+@param('training.epochs')
+def get_step_lr_fastadvprop(epoch, lr, step_ratio, epochs):
+    if epoch >= epochs:
+        return 0
+    if epoch < 30:
+        num_steps = 0
+    elif epoch < 60:
+        num_steps = 1
+    elif epoch < 90:
+        num_steps = 2
+    elif epoch < 100:
+        num_steps = 3
+    else:
+        num_steps = 4
+    
+    return step_ratio**num_steps * lr
+
 @param('lr.lr')
 @param('training.epochs')
 @param('lr.lr_peak_epoch')
@@ -213,7 +254,8 @@ class ImageNetTrainer:
     @param('logging.convert')
     @param('logging.resume_checkpoint')
     @param('logging.usewb')
-    def __init__(self, rank, distributed, resume_id = None, convert=False, resume_checkpoint=None, usewb=False):
+    @param('logging.project_name')
+    def __init__(self, rank, distributed, resume_id = None, convert=False, resume_checkpoint=None, usewb=False, project_name=None):
         self.all_params = get_current_config()
         self.rank = rank
         self.gpu = self.rank % ch.cuda.device_count()
@@ -235,42 +277,49 @@ class ImageNetTrainer:
         self.initialize_logger()
         if resume_id is not None or resume_checkpoint is not None:
             # traverse the folder and find the latest checkpoint
+            ckpt_path = None
             if resume_checkpoint is None:
                 latest_epoch_ckpt_file = None
                 latest_epoch = -float('inf')
+                ch.distributed.barrier()
                 for file in os.listdir(self.log_folder):
                     if 'epoch' in file:
                         epoch = int(file.replace('epoch', '').replace('.pt', ''))
                         if epoch > latest_epoch:
                             latest_epoch = epoch
                             latest_epoch_ckpt_file = file
-                ckpt_path = Path(self.log_folder)/latest_epoch_ckpt_file
+                if latest_epoch != -float('inf'):
+                    ckpt_path = Path(self.log_folder)/latest_epoch_ckpt_file
                 
             else:
                 ckpt_path = resume_checkpoint
-            
-            print(f"loaded checkpoint at :{ckpt_path}")
-            checkpoint_dict = ch.load(ckpt_path)
-            if 'state_dict' in checkpoint_dict:
-                # load model, optimizer, starting epoch number
-                if convert:
-                    checkpoint_dict['state_dict'] = self.convert(checkpoint_dict['state_dict'])
-                self.model.load_state_dict(checkpoint_dict['state_dict'])
-                self.optimizer.load_state_dict(checkpoint_dict['optimizer'])
-                self.starting_epoch = checkpoint_dict['starting_epoch']
+            if ckpt_path is not None:
+                print(f"loaded checkpoint at :{ckpt_path}")
+                checkpoint_dict = ch.load(ckpt_path)
+                if 'state_dict' in checkpoint_dict:
+                    # load model, optimizer, starting epoch number
+                    if convert:
+                        checkpoint_dict['state_dict'] = self.convert(checkpoint_dict['state_dict'])
+                    self.model.load_state_dict(checkpoint_dict['state_dict'])
+                    self.optimizer.load_state_dict(checkpoint_dict['optimizer'])
+                    self.starting_epoch = checkpoint_dict['starting_epoch']
+                else:
+                    if convert:
+                        checkpoint_dict = self.convert(checkpoint_dict)
+                    self.starting_epoch = 0
+                    self.model.load_state_dict(checkpoint_dict)
             else:
-                if convert:
-                    checkpoint_dict = self.convert(checkpoint_dict)
+                print(f"Failed to find checkpoint in {self.log_folder}. Starting a new run")
                 self.starting_epoch = 0
-                self.model.load_state_dict(checkpoint_dict)
         else:
             self.starting_epoch = 0
         if rank == 0:
             if resume_id:
-                wandb.init(project="cache-advprop", entity="pchiang", name=os.path.normpath(self.log_folder).split("/")[-2], resume=True, id=self.uid)
+                wandb.init(project=project_name, entity="pchiang", name=os.path.normpath(self.log_folder).split("/")[-2], resume=True, id=self.uid,
+                config={'.'.join(k): self.all_params[k] for k in self.all_params.entries.keys()})
             else:
-                wandb.init(project="cache-advprop", entity="pchiang", name=os.path.normpath(self.log_folder).split("/")[-2], id=self.uid)
-            wandb.config = {'.'.join(k): self.all_params[k] for k in self.all_params.entries.keys()}
+                wandb.init(project=project_name, entity="pchiang", name=os.path.normpath(self.log_folder).split("/")[-2], id=self.uid,
+                config={'.'.join(k): self.all_params[k] for k in self.all_params.entries.keys()})
             self.usewb = True
         else:
             self.usewb = False
@@ -309,7 +358,8 @@ class ImageNetTrainer:
         lr_schedules = {
             'cyclic': get_cyclic_lr,
             'cyclic_warm': get_cyclic_lr_withwarmups,
-            'step': get_step_lr
+            'step': get_step_lr,
+            'step_fastadvprop': get_step_lr_fastadvprop
         }
 
         return lr_schedules[lr_schedule_type](epoch)
@@ -496,7 +546,7 @@ class ImageNetTrainer:
     @param('training.freeze_nonlayernorm_epochs')
     def train(self, epochs, log_level, save_checkpoint_interval, freeze_nonlayernorm_epochs=None):
         for epoch in range(self.starting_epoch, epochs):
-            
+            self.cur_epoch = epoch
             res = self.get_resolution(epoch)
             self.decoder.output_size = (res, res)
             if freeze_nonlayernorm_epochs is not None:
@@ -538,16 +588,31 @@ class ImageNetTrainer:
         start_val = time.time()
         stats = self.val_loop()
         val_time = time.time() - start_val
+        
         if self.rank == 0:
+            if not hasattr(self, 'best_stats'):
+                self.best_stats = dict()
+                self.best_stats = {f"{k}_best":v for k,v in stats.items()}
+            else:
+                for k, v in stats.items():
+                    if self.best_stats[f"{k}_best"] < v:
+                        self.best_stats[f"{k}_best"] = v
+
             self.log(dict({
                 'current_lr': self.optimizer.param_groups[0]['lr'],\
                 'val_time': val_time
-            }, **extra_dict, **stats))
+            }, **extra_dict, **stats, **self.best_stats))
             if self.usewb:
+                if not hasattr(self, 'last_log_time'):
+                    self.last_log_time = self.start_time
                 wandb.log(dict({
-                'current_lr': self.optimizer.param_groups[0]['lr'],\
-                'val_time': val_time
-            }, **extra_dict, **stats), step=extra_dict['epoch'])
+                'current_lr': self.optimizer.param_groups[0]['lr'],
+                'val_time': val_time,
+                'epoch_time': (time.time() - self.last_log_time)/60
+                }, **extra_dict, **stats, **self.best_stats), step=extra_dict['epoch']
+                )
+                self.last_log_time = time.time()
+            
 
         return stats
 
@@ -580,48 +645,177 @@ class ImageNetTrainer:
     @param('adv.step_size_input')
     @param('adv.cache_frequency')
     @param('adv.cache_size_multiplier')
-    def adv_cache(self, images, step_size_input=None, radius_input=None, cache_frequency=1, cache_size_multiplier=1):
-        
+    @param('adv.cache_sequential')
+    @param('adv.cache_class_wise')
+    @param('adv.pyramid')
+    @param('data.num_classes')
+    @param('training.mixup')
+    @param('adv.optimizer')
+    @param('adv.lr')
+    @param('adv.radius_schedule')
+    @param('adv.cache_class_wise_shuffle_iter')
+    def adv_cache(self, images, target, step_size_input=None, radius_input=None, 
+    cache_frequency=1, cache_size_multiplier=1, cache_class_wise=False, num_classes=None,
+    mixup=None, cache_sequential=False, pyramid=0, optimizer='pgd', lr=None, beta=0.9, radius_schedule=False, cache_class_wise_shuffle_iter=float('inf')):
+        if pyramid:
+            return self.adv_cache_pyramid(images, target)
+        if radius_schedule:
+            radius_multiplier = get_radius_multiplier(self.cur_epoch)
+        else:
+            radius_multiplier = 1
+        if cache_class_wise:
+            if not hasattr(self, 'adv_cache_noise'):
+                self.adv_cache_noise = ch.zeros((int(num_classes), *images.shape[1:]), device=images.device, dtype=images.dtype)
+                self.adv_cache_noise.requires_grad_(True)
+                self.adv_cache_iter = 0
+            else:
+                self.adv_cache_iter += 1 
+                
+                if self.adv_cache_iter %cache_frequency  == 0:
+                    # take an adversarial step
+                    if optimizer == 'pgd':
+                        grad = self.adv_cache_noise.grad
+                        self.adv_cache_noise.data += grad.sign() * step_size_input
+                        self.adv_cache_noise.data.clamp_(-radius_input, +radius_input)
+                    elif optimizer == 'momentum':
+                        grad = self.adv_cache_noise.grad
+                        if not hasattr(self, 'adv_cache_noise_last'):
+                            self.adv_cache_grad_last = grad
+                        else:
+                            self.adv_cache_grad_last = self.adv_cache_grad_last * beta + grad * (1-beta)
+                        self.adv_cache_noise.data += self.adv_cache_grad_last * lr
+                        self.adv_cache_noise.data.clamp_(-radius_input*radius_multiplier, +radius_input*radius_multiplier)
+                    self.adv_cache_noise.grad = None
+                else:
+                    self.adv_cache_noise.grad = None
+
+                if self.adv_cache_iter % cache_class_wise_shuffle_iter == 0:
+                    print("shuffling the data set!")
+                    self.adv_cache_noise.data = self.adv_cache_noise.data[ch.randperm(len(self.adv_cache_noise.data))]
+            if mixup:
+                t0 = target[:, 0].long()
+                t1 = target[:, 1].long()
+                lam = target[0, 2]
+                final_noise = self.adv_cache_noise[t0]*lam + self.adv_cache_noise[t1]*(1-lam)
+                return final_noise, FeatureNoise({})
+            else:
+                return self.adv_cache_noise[target], FeatureNoise({})
+        else:
+            b_size = images.shape[0]
+            if not hasattr(self, 'adv_cache_noise'):
+                self.adv_cache_noise = ch.zeros((int(b_size*cache_size_multiplier), *images.shape[1:]), device=images.device, dtype=images.dtype)
+                self.adv_cache_noise.requires_grad_(True)
+                self.adv_cache_iter = 0
+            else:
+                self.adv_cache_iter += 1
+                if self.adv_cache_iter%cache_frequency  == 0:
+                    # take an adversarial step
+                    if optimizer == 'pgd':
+                        grad = self.adv_cache_noise.grad
+                        self.adv_cache_noise.data += grad.sign() * step_size_input
+                        self.adv_cache_noise.data.clamp_(-radius_input*radius_multiplier, +radius_input*radius_multiplier)
+                    elif optimizer == 'momentum':
+                        grad = self.adv_cache_noise.grad
+                        if not hasattr(self, 'adv_cache_grad_last'):
+                            self.adv_cache_grad_last = grad
+                        else:
+                            self.adv_cache_grad_last = self.adv_cache_grad_last * beta + grad * (1-beta)
+                        
+                        self.adv_cache_noise.data += self.adv_cache_grad_last * lr
+                        self.adv_cache_noise.data.clamp_(-radius_input*radius_multiplier, +radius_input*radius_multiplier)
+                    
+                    self.adv_cache_noise.grad = None
+                else:
+                    self.adv_cache_noise.grad = None
+            if cache_size_multiplier == 1:
+                return self.adv_cache_noise, FeatureNoise({})
+            elif cache_size_multiplier > 1:
+                if cache_sequential:
+                    start_idx = (self.adv_cache_iter%cache_size_multiplier)*b_size
+                    end_idx = start_idx + b_size
+                    idx = ch.arange(start_idx, end_idx, dtype=ch.long)
+                else:
+                    idx = ch.randperm(len(self.adv_cache_noise))[:b_size]
+                return self.adv_cache_noise[idx], FeatureNoise({})
+            elif cache_size_multiplier < 1:
+                return self.adv_cache_noise.repeat(int(1/cache_size_multiplier), 1, 1, 1), FeatureNoise({})
+    
+    @param('adv.radius_input')
+    @param('adv.step_size_input')
+    @param('adv.cache_frequency')
+    @param('adv.cache_size_multiplier')
+    @param('adv.cache_sequential')
+    @param('adv.cache_class_wise')
+    @param('data.num_classes')
+    @param('training.mixup')
+    def adv_cache_pyramid(self, images, target, step_size_input=None, radius_input=None, 
+    cache_frequency=1, cache_size_multiplier=1, cache_class_wise=False, num_classes=None,
+    mixup=None, cache_sequential=False, scale_factors=[32, 16, 1], m_factors=[20, 10, 1]):
         b_size = images.shape[0]
         if not hasattr(self, 'adv_cache_noise'):
-            self.adv_cache_noise = ch.zeros((int(b_size*cache_size_multiplier), *images.shape[1:]), device=images.device, dtype=images.dtype)
-            self.adv_cache_noise.requires_grad_(True)
+            self.adv_cache_noise_pyramid = []
+            for scale_factor in scale_factors:
+                self.adv_cache_noise_pyramid.append(
+                    ch.zeros((int(b_size*cache_size_multiplier), images.shape[1], *(ch.tensor(images.shape[2:])//scale_factor)), device=images.device, dtype=images.dtype)
+                )
+            for adv_cache_noise in self.adv_cache_noise_pyramid:
+                adv_cache_noise.requires_grad_(True)
             self.adv_cache_iter = 0
         else:
-            self.adv_cache_iter = (self.adv_cache_iter + 1)%cache_frequency 
-            if self.adv_cache_iter == 0:
+            self.adv_cache_iter += 1
+            if self.adv_cache_iter%cache_frequency  == 0:
                 # take an adversarial step
-                grad = self.adv_cache_noise.grad
-                self.adv_cache_noise.data += grad.sign() * step_size_input
-                self.adv_cache_noise.data.clamp_(-radius_input, +radius_input)
-                self.adv_cache_noise.grad = None
+                for adv_cache_noise in self.adv_cache_noise_pyramid:
+                    grad = adv_cache_noise.grad
+                    adv_cache_noise.data += grad.sign() * step_size_input
+                    adv_cache_noise.data.clamp_(-radius_input, +radius_input)
+            for adv_cache_noise in self.adv_cache_noise_pyramid:
+                adv_cache_noise.grad = None
+
+        pyramid_noise = None
+        for noise, scale_factor, m_factor in zip(self.adv_cache_noise_pyramid, scale_factors, m_factors):
+            if pyramid_noise is None:
+                pyramid_noise = ch.nn.functional.upsample(noise, images.shape[2:])*m_factor
             else:
-                self.adv_cache_noise.grad = None
+                pyramid_noise += ch.nn.functional.upsample(noise, images.shape[2:])*m_factor
+
         if cache_size_multiplier == 1:
-            return self.adv_cache_noise, FeatureNoise({})
+            return pyramid_noise, FeatureNoise({})
         elif cache_size_multiplier > 1:
-            idx = ch.randperm(len(self.adv_cache_noise))[:b_size]
-            return self.adv_cache_noise[idx], FeatureNoise({})
+            if cache_sequential:
+                start_idx = (self.adv_cache_iter%cache_size_multiplier)*b_size
+                end_idx = start_idx + b_size
+                idx = ch.arange(start_idx, end_idx, dtype=ch.long)
+            else:
+                idx = ch.randperm(len(pyramid_noise))[:b_size]
+            return pyramid_noise[idx], FeatureNoise({})
         elif cache_size_multiplier < 1:
-            return self.adv_cache_noise.repeat(int(1/cache_size_multiplier), 1, 1, 1), FeatureNoise({})
+            return pyramid_noise.repeat(int(1/cache_size_multiplier), 1, 1, 1), FeatureNoise({})
+
 
     @param('adv.num_steps')
     @param('adv.radius_input')
     @param('adv.step_size_input')
     @param('adv.adv_features')
     @param('adv.adv_cache')
+    @param('adv.optimizer')
+    @param('adv.lr')
     def adv_step(self, model, images, target,
-        num_steps=None, step_size_input=None, radius_input=None, adv_features=None, aux_branch=False, adv_cache=False):
+        num_steps=None, step_size_input=None, radius_input=None, adv_features=None, aux_branch=False, adv_cache=False, optimizer='pgd', lr=None, beta=0.9):
         if adv_cache:
-            return self.adv_cache(images)
+            return self.adv_cache(images, target)
         input_adv_noise = ch.zeros_like(images, requires_grad=True)
         feature_adv_noise = FeatureNoise({int(layer): None for layer in adv_features} if adv_features is not None else {})
         for step in range(num_steps):
             with autocast():
-                if aux_branch == False:
-                    output = self.model(images+input_adv_noise, feature_noise=feature_adv_noise)
+                if isinstance(self.model.module, ResNet):
+                    output = self.model(images+input_adv_noise) # resnet doesn't support feature noise
                 else:
-                    output = self.model(images+input_adv_noise, feature_noise=feature_adv_noise, aux_branch=aux_branch)
+                    if aux_branch == False:
+                        output = self.model(images+input_adv_noise, feature_noise=feature_adv_noise)
+                    else:
+                        output = self.model(images+input_adv_noise, feature_noise=feature_adv_noise, aux_branch=aux_branch)
+                
                 loss_adv = self.train_loss_func(output, target)
                 all_step_sizes = [step_size_input]
                 all_radii = [radius_input]
@@ -631,13 +825,29 @@ class ImageNetTrainer:
                         all_noises.append(feature_adv_noise[int(k)])
                         all_step_sizes.append(adv_features[k]['step_size'])
                         all_radii.append(adv_features[k]['radius'])
-                all_grad = ch.autograd.grad(loss_adv, all_noises)
+                all_grad = ch.autograd.grad(self.scaler.get_scale()*loss_adv, all_noises)
                 # apply perturbations to each individual features
-                for noise, grad, step_size, radius in zip(all_noises, all_grad, all_step_sizes, all_radii):
-                    # normalize gradients to unit norm & times the radius
-                    # grad /= (grad.norm(dim=ch.arange(1, len(grad.shape)).tolist(), keepdim=True, p=2) + 1e-5)
-                    noise.data += grad.sign() * step_size
-                    noise.data.clamp_(-radius, +radius)
+                if optimizer == 'pgd':
+                    for noise, grad, step_size, radius in zip(all_noises, all_grad, all_step_sizes, all_radii):
+                        # normalize gradients to unit norm & times the radius
+                        # grad /= (grad.norm(dim=ch.arange(1, len(grad.shape)).tolist(), keepdim=True, p=2) + 1e-5)
+                        
+                        noise.data += grad.sign() * step_size
+                        noise.data.clamp_(-radius, +radius)
+                elif optimizer == 'momentum':
+                    if not hasattr(self, 'last_adv_grad'):
+                        self.last_adv_grad = all_grad
+
+                    for noise, grad, last_grad, step_size, radius in zip(all_noises, all_grad, self.last_adv_grad, all_step_sizes, all_radii):
+                        # normalize gradients to unit norm & times the radius
+                        # grad /= (grad.norm(dim=ch.arange(1, len(grad.shape)).tolist(), keepdim=True, p=2) + 1e-5)
+                        
+                        noise.data += (last_grad * beta + grad/self.scaler.get_scale() * (1-beta))*lr
+                        last_grad.data = (last_grad * beta + grad/self.scaler.get_scale() * (1-beta))
+                        noise.data.clamp_(-radius, +radius)
+
+                    
+                        
         for k in feature_adv_noise:
             feature_adv_noise[k] = feature_adv_noise[k].detach()
         
@@ -647,11 +857,12 @@ class ImageNetTrainer:
     @param('training.grad_clip_norm')
     @param('adv.num_steps')
     @param('adv.adv_loss_weight')
+    @param('adv.adv_loss_even')
     @param('adv.freeze_layers')
     @param('sam.radius')
     @param('training.fixed_dropout')
     @param('adv.split_backward')
-    def train_loop(self, epoch, log_level, grad_clip_norm, num_steps=0, adv_loss_weight=0, radius=0, fixed_dropout=False, freeze_layers=None, split_backward=False, freeze_nonlayernorm=False): 
+    def train_loop(self, epoch, log_level, grad_clip_norm=None, num_steps=0, adv_loss_weight=0, radius=0, fixed_dropout=False, freeze_layers=None, split_backward=False, freeze_nonlayernorm=False, adv_loss_even=False): 
         model = self.model
         model.train()
         losses = []
@@ -672,7 +883,7 @@ class ImageNetTrainer:
 
             # generate adversarial examples/intermediate adversarial examples
             if adv:
-                if isinstance(self.model.module, SimpleViTDecoupledLN) or isinstance(self.model.module, MViTDecoupled) :
+                if hasattr(self.model.module, 'make_adv'):
                     self.model.module.make_adv()
                 images_adv, features_adv = self.adv_step(self.model, images, target)
             if fixed_dropout:
@@ -695,26 +906,50 @@ class ImageNetTrainer:
                             para.data += para.pert
                             para.grad = None
                 
-                if isinstance(self.model.module, SimpleViTDecoupledLN) or isinstance(self.model.module, MViTDecoupled)  or isinstance(self.model.module, SimpleViTTripleLN)  :
+                if hasattr(self.model.module, 'make_clean'):
                     self.model.module.make_clean()
                 output = self.model(images)
                 loss_train = self.train_loss_func(output, target)
                 if split_backward:
                     # add dummy loss from parameters
-                    dummy_loss = sum([para.sum()*0 for para in model.parameters()])
-                    self.scaler.scale(loss_train*(1-adv_loss_weight)+dummy_loss).backward()
-                
+                    with self.model.no_sync():
+                        dummy_loss = sum([para.sum()*0 for para in model.parameters()])
+                        if adv_loss_even:
+                            self.scaler.scale(loss_train+dummy_loss).backward()
+                        else:
+                            self.scaler.scale(loss_train*(1-adv_loss_weight)+dummy_loss).backward()
                 if adv:
-                    if isinstance(self.model.module, SimpleViTDecoupledLN) or isinstance(self.model.module, MViTDecoupled) :
+                    if hasattr(self.model.module, 'make_adv'):
                         self.model.module.make_adv()
-                    
-                    output_adv = self.model(images+images_adv, feature_noise=features_adv, freeze_layers=freeze_layers)
+                                        
+                    if isinstance(self.model.module, ResNet):
+                        output_adv = self.model(images+images_adv)
+                    else:
+                        output_adv = self.model(images+images_adv, feature_noise=features_adv, freeze_layers=freeze_layers)
+                    if self.rank == 0:
+                        # log some images to wandb
+                        if ix == 0:
+                            clean_img_arr = make_grid(images, normalize=True)
+                            adv_img_arr = make_grid(images+images_adv, normalize=True)
+                            clean_img = wandb.Image(clean_img_arr, caption="clean images")
+                            adv_img = wandb.Image(adv_img_arr, caption="adv images")
+                            wandb.log(
+                                {'clean_img': clean_img,
+                                "adv_img": adv_img},
+                                commit=False
+                                )
                     loss_train_adv = self.train_adv_loss_func(output_adv, target)
                     dummy_loss = sum([para.sum()*0 for para in model.parameters()])
                     if split_backward:
-                        self.scaler.scale(loss_train_adv*(adv_loss_weight)+dummy_loss).backward()
+                        if adv_loss_even:
+                            self.scaler.scale(loss_train_adv+dummy_loss).backward()
+                        else:
+                            self.scaler.scale(loss_train_adv*(adv_loss_weight)+dummy_loss).backward()
                     else:
-                        loss_train = loss_train_adv * adv_loss_weight + loss_train * (1-adv_loss_weight) + dummy_loss
+                        if adv_loss_even:
+                            loss_train = loss_train_adv + loss_train + dummy_loss
+                        else:
+                            loss_train = loss_train_adv * adv_loss_weight + loss_train * (1-adv_loss_weight) + dummy_loss
                 else:
                     loss_train_adv= ch.tensor(0)
   
@@ -722,6 +957,8 @@ class ImageNetTrainer:
                 self.scaler.scale(loss_train).backward()
             # Unscales the gradients of optimizer's assigned params in-place
             self.scaler.unscale_(self.optimizer)
+            if hasattr(self, 'adv_cache_noise'):
+                self.adv_cache_noise.grad.data /= self.scaler.get_scale()
             if freeze_nonlayernorm:
                 for name, para in model.named_parameters():
                     if 'norm' in name:
@@ -731,7 +968,8 @@ class ImageNetTrainer:
                         para.grad.zero_()
 
             # Since the gradients of optimizer's assigned params are unscaled, clips as usual:
-            ch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
+            if grad_clip_norm is not None:
+                ch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
 
             self.scaler.step(self.optimizer)
             self.scaler.update()

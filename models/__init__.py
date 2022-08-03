@@ -5,6 +5,32 @@ from .simple_vit_decoupled import SimpleViTDecoupledLN
 from .simple_vit_triple import SimpleViTTripleLN
 from .mvit import MViT
 from .mvit_config import get_cfg
+from torchvision import models
+import torch as ch
+import torch.nn as nn
+
+class BatchNormDecoupled(nn.Module):
+    def __init__(self, bn):
+        super().__init__()
+        self.batchnorm_clean = bn
+        self.batchnorm_adv = nn.BatchNorm2d(bn.num_features)
+        self.clean = True
+        self.factor = 1
+    def forward(self, x):
+        if self.clean:
+            return self.batchnorm_clean(x)
+            # return self.batchnorm_adv(x)*0+ self.batchnorm_clean(x)*1
+        else:
+            if self.factor == 1:
+                return self.batchnorm_adv(x)
+                # return self.batchnorm_adv(x)*self.factor + self.batchnorm_clean(x)*(1-self.factor)
+            # else:
+                # return self.batchnorm_adv(x)*self.factor + self.batchnorm_clean(x)*(1-self.factor)
+    def make_clean(self):
+        self.clean = True
+    def make_adv(self, factor=1):
+        self.clean = False
+        self.factor = factor
 
 def get_arch(arch_name, num_classes, probe=False, split_layer=None):
     if arch_name == 'vit_t':
@@ -107,6 +133,31 @@ def get_arch(arch_name, num_classes, probe=False, split_layer=None):
             mlp_dim = 3072,
             probe=probe
         )
+    if arch_name == 'resnet50':
+        return models.resnet50(pretrained=False, num_classes=num_classes)
+    elif arch_name == 'resnet50_decoupled':
+        model = models.resnet50(pretrained=False, num_classes=num_classes)
+        
+        def apply_decoupled_batchnorm(mod: ch.nn.Module):
+            for (name, child) in mod.named_children():
+                if isinstance(child, ch.nn.BatchNorm2d): 
+                    setattr(mod, name, BatchNormDecoupled(child))
+                else: apply_decoupled_batchnorm(child)
+        # need to add hooks for adv_clean
+        apply_decoupled_batchnorm(model)
+        def make_clean():
+            for module in model.modules():
+                if isinstance(module, BatchNormDecoupled):
+                    module.make_clean()
+        def make_adv():
+            for module in model.modules():
+                if isinstance(module, BatchNormDecoupled):
+                    module.make_adv()
+        model.make_clean = make_clean
+        model.make_adv = make_adv
+        return model
+
+
     if arch_name == 'mvit':
         cfg = get_cfg()
         cfg.merge_from_list(
