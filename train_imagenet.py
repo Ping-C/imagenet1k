@@ -110,6 +110,9 @@ Section('training', 'training hyper param stuff').params(
     label_smoothing=Param(float, 'label smoothing parameter', default=0.1),
     fixed_dropout=Param(int, 'whether to use fixed dropout pattern when running sam', default=0),
     mixup=Param(int, 'mixup augmentation', default=0),
+    randaug=Param(int, 'random augmentation', default=0),
+    randaug_num_ops=Param(int, 'number of composable random augmentation', default=2),
+    randaug_magnitude=Param(int, 'magnitude of random augmentation', default=15),
     distributed=Param(int, 'is distributed?', default=0),
     use_blurpool=Param(int, 'use blurpool?', default=0),
     freeze_nonlayernorm_epochs=Param(int, 'use blurpool?', default=None),
@@ -457,8 +460,11 @@ class ImageNetTrainer:
     @param('training.distributed')
     @param('data.in_memory')
     @param('training.mixup')
+    @param('training.randaug')
+    @param('training.randaug_num_ops')
+    @param('training.randaug_magnitude')
     def create_train_loader(self, train_dataset, num_workers, batch_size,
-                            distributed, in_memory, mixup):
+                            distributed, in_memory, mixup, randaug=False, randaug_num_ops=None, randaug_magnitude=None):
         this_device = f'cuda:{self.gpu}'
         train_path = Path(train_dataset)
         assert train_path.is_file()
@@ -485,6 +491,9 @@ class ImageNetTrainer:
             mixup_label = ffcv.transforms.LabelMixup(0.2, True)
             image_pipeline.insert(2, mixup_img)
             label_pipeline.insert(1, mixup_label)
+        elif randaug:
+            image_pipeline.insert(2, ffcv.transforms.RandAugment(num_ops=randaug_num_ops, magnitude=randaug_magnitude))
+        assert (mixup and randaug) == False # cannot apply both mixup and rand augmentation simultaneously
         order = OrderOption.RANDOM if distributed else OrderOption.QUASI_RANDOM
         loader = Loader(train_dataset,
                         batch_size=batch_size,

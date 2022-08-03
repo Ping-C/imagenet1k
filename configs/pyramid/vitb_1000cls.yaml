@@ -17,7 +17,7 @@ model:
   arch: vit_b
 resolution:
   end_ramp: 13
-  max_res: 224å
+  max_res: 224
   min_res: 224
   start_ramp: 11
 training:
