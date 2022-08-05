@@ -5,18 +5,18 @@
 
 # Lines that begin with #SBATCH specify commands to be used by SLURM for scheduling
 #SBATCH --job-name=train                                # sets the job name if not set from environment
-#SBATCH --array=27                       # Submit 8 array jobs, throttling to 4 at a time
+#SBATCH --array=38                       # Submit 8 array jobs, throttling to 4 at a time
 #SBATCH --output logs/imgnt1k_vitb_%A_%a.log                            # indicates a file to redirect STDOUT to; %j is the jobid, _%A_%a is array task id
 #SBATCH --error logs/imgnt1k_vitb_%A_%a.log                             # indicates a file to redirect STDERR to; %j is the jobid,_%A_%a is array task id
 #SBATCH --account=all
 #SBATCH --ntasks=32
 #SBATCH --gpus-per-task=1
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=8
 #SBATCH --partition=lowpri
-#SBATCH --exclude=a100-st-p4d24xlarge-121,a100-st-p4d24xlarge-278,a100-st-p4d24xlarge-158,a100-st-p4d24xlarge-271
+#SBATCH --exclude=
 #SBATCH --nice=0                                              #positive means lower priority
 #SBATCH --use-min-nodes                                              #positive means lower priority
-#SBATCH --nodes=4-10                                              #positive means lower priority
+#SBATCH --nodes=5-10                                              #positive means lower priority
 ## SBATCH --dependency=                                              #positive means lower priority
 
 
@@ -61,9 +61,33 @@ command_list[22]="python train_imagenet.py --config-file configs/pyramid/vitb_10
 command_list[23]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls_cache.yaml --adv.radius_input=0.6 --adv.step_size_input=0.06 --adv.adv_cache=1                                                                            --logging.project_name imgnt1K --logging.resume_id=vitb1000epoch300adv3 --logging.folder output/pyramid/vitb_r0.6_s0.06_cache $SHARED_PARAM"
 command_list[24]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls_cache.yaml --adv.radius_input=0.2 --adv.step_size_input=0.02 --adv.adv_cache=1 --adv.cache_class_wise=1                                                   --logging.project_name imgnt1K --logging.resume_id=vitb1000epoch300aev3 --logging.folder output/pyramid/vitb_r0.2_s0.02_cacheclasswise $SHARED_PARAM"
 command_list[25]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls_cache.yaml --adv.radius_input=0.01 --adv.step_size_input=0.01                                                                                             --logging.project_name imgnt1K --logging.resume_id=vitb1000epoch300afv3 --logging.folder output/pyramid/vitb_r0.01_s0.01_c1 $SHARED_PARAM"
-command_list[26]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls_cache.yaml --adv.radius_input=0.2 --adv.step_size_input=0.02 --adv.adv_cache=1 --adv.radius_schedule=1 --adv.max_radius_multiplier=2 --adv.start_epoch=30 --logging.project_name imgnt1K --logging.resume_id=vitb1000epoch300agv3 --logging.folder output/pyramid/vitb_r0.2_s0.02_cache_2-at-ep30 $SHARED_PARAM"
+command_list[26]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls_cache.yaml --adv.radius_input=0.2 --adv.step_size_input=0.02 --adv.adv_cache=1 --adv.radius_schedule=1 --radius.max_multiplier=2 --radius.schedule_type=linear_increase --radius.start_epoch=30 --logging.project_name imgnt1K --logging.resume_id=vitb1000epoch300agv3 --logging.folder output/pyramid/vitb_r0.2_s0.02_cache_2-at-ep30 $SHARED_PARAM"
 
 command_list[27]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls.yaml --training.mixup=0 --training.randaug=1                                                                                                               --logging.project_name imgnt1K --logging.resume_id=vitb1000epoch300ahv3 --logging.folder output/pyramid/vitb_baseline_randaug $SHARED_PARAM"
+command_list[28]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls_cache.yaml --training.mixup=0 --training.randaug=1 --adv.radius_input=0.2 --adv.step_size_input=0.02 --adv.adv_cache=1                                     --logging.project_name imgnt1K --logging.resume_id=vitb1000epoch300aiv3 --logging.folder output/pyramid/vitb_r0.2_s0.02_cache_randaug $SHARED_PARAM"
+command_list[29]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls_cache.yaml --training.mixup=0 --training.randaug=1 --adv.radius_input=0.01 --adv.step_size_input=0.01                                                      --logging.project_name imgnt1K --logging.resume_id=vitb1000epoch300ajv3 --logging.folder output/pyramid/vitb_r0.01_s0.01_c1_randaug $SHARED_PARAM"
+SCHEDULE="--adv.radius_schedule=1 --radius.max_multiplier=10 --radius.start_epoch=10 --radius.schedule_type=linear_increase "
+command_list[30]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls_cache.yaml --training.mixup=0 --training.randaug=1 --adv.radius_input=0.2 --adv.step_size_input=0.02 --adv.adv_cache=1 $SCHEDULE                           --logging.project_name imgnt1K --logging.resume_id=vitb1000epoch300akv3 --logging.folder output/pyramid/vitb_r0.2_s0.02_cache_randaug_inc10 $SHARED_PARAM"
+
+PYRAMID_PARAM="--training.mixup=0 --training.randaug=1 --training.mixed_precision=0 --training.label_smoothing=0 --lr.warmup_epochs=3"
+command_list[31]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls.yaml $PYRAMID_PARAM                                                                                                                                         --logging.project_name imgnt1K --logging.resume_id=vitb1000epoch300alv3 --logging.folder output/pyramid/vitb_baseline_pyramid $SHARED_PARAM"
+command_list[32]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls_cache.yaml $PYRAMID_PARAM --adv.radius_input=1.00  --adv.step_size_input=0.05  --adv.adv_cache=1                                                            --logging.project_name imgnt1K --logging.resume_id=vitb1000epoch300amv3 --logging.folder output/pyramid/vitb_r1_s0.05_cache_pyramid $SHARED_PARAM"
+
+PYRAMID_PARAM="--training.mixup=0 --training.randaug=1 --training.mixed_precision=0 --training.label_smoothing=0 --lr.warmup_epochs=4"
+command_list[33]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls.yaml $PYRAMID_PARAM                                                                                                                                         --logging.project_name imgnt1K --logging.resume_id=vitb1000epoch300anv3 --logging.folder output/pyramid/vitb_baseline_pyramid_v2 $SHARED_PARAM"
+
+PYRAMID_PARAM="--training.mixup=0 --training.randaug=1 --training.mixed_precision=0 --lr.warmup_epochs=4"
+command_list[34]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls.yaml $PYRAMID_PARAM                                                                                                                                         --logging.project_name imgnt1K --logging.resume_id=vitb1000epoch300aov3 --logging.folder output/pyramid/vitb_baseline_pyramid_v3 $SHARED_PARAM"
+command_list[35]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls.yaml $PYRAMID_PARAM  --adv.radius_input=1.00  --adv.step_size_input=0.05  --adv.adv_cache=1                                                                 --logging.project_name imgnt1K --logging.resume_id=vitb1000epoch300apv3 --logging.folder output/pyramid/vitb_r1_s0.05_cache_pyramid_v3 $SHARED_PARAM"
+
+SCHEDULE="--adv.radius_schedule=1 --radius.max_multiplier=1.5 --radius.min_multiplier=0.5 --radius.period_count 10 --radius.start_epoch=10 --radius.schedule_type=wave "
+command_list[36]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls_cache.yaml --training.mixup=0 --training.randaug=1 --adv.radius_input=1 --adv.step_size_input=0.05 --adv.adv_cache=1 $SCHEDULE                              --logging.project_name imgnt1K --logging.resume_id=vitb1000epoch300aqv3 --logging.folder output/pyramid/vitb_r1_s0.05_cache_randaug_wave1.5-0.5 $SHARED_PARAM"
+
+PYRAMID_PARAM="--training.mixup=0 --training.randaug=1 --training.mixed_precision=0 --lr.warmup_epochs=4 --model.arch=regvit_b"
+command_list[37]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls.yaml $PYRAMID_PARAM                                                                                                                                         --logging.project_name imgnt1K --logging.resume_id=vitb1000epoch300arv3 --logging.folder output/pyramid/regvitb_baseline $SHARED_PARAM"
+
+PYRAMID_PARAM="--training.mixup=0 --training.randaug=1 --training.label_smoothing=0 --training.mixed_precision=0 --lr.warmup_epochs=4 --model.arch=regvit_b"
+command_list[38]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls.yaml $PYRAMID_PARAM                                                                                                                                         --logging.project_name imgnt1K --logging.resume_id=vitb1000epoch300asv3 --logging.folder output/pyramid/regvitb_baseline_nosmooth $SHARED_PARAM"
 
 cur_command=${command_list[SLURM_ARRAY_TASK_ID]}
 echo $cur_command

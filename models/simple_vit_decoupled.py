@@ -39,6 +39,10 @@ class LayerNormDecoupled(nn.Module):
         self.clean = True
     def make_adv(self):
         self.clean = False
+    def reset_layernorm(self):
+        self.layernorm_adv.weight.data = self.layernorm_clean.weight.data.clone()
+        self.layernorm_adv.bias.data = self.layernorm_clean.bias.data.clone()
+        
 
 class FeedForward(nn.Module):
     def __init__(self, dim, hidden_dim):
@@ -208,8 +212,11 @@ class SimpleViTDecoupledLN(nn.Module):
         for module in self.modules():
             if isinstance(module, LayerNormDecoupled):
                 module.make_adv()
+    def reset_layernorm(self):
+        for module in self.modules():
+            if isinstance(module, LayerNormDecoupled):
+                module.reset_layernorm()
     
         
                 
 
-                

@@ -8,7 +8,8 @@ from .mvit_config import get_cfg
 from torchvision import models
 import torch as ch
 import torch.nn as nn
-
+from timm.models.vision_transformer import VisionTransformer
+from .simple_vit_decoupled import LayerNormDecoupled
 class BatchNormDecoupled(nn.Module):
     def __init__(self, bn):
         super().__init__()
@@ -110,6 +111,18 @@ def get_arch(arch_name, num_classes, probe=False, split_layer=None):
             heads = 12,
             mlp_dim = 3072,
             probe=probe
+        )
+    elif arch_name == 'regvit_b':
+        return VisionTransformer(
+            img_size = 224,
+            patch_size = 16,
+            num_classes = num_classes,
+            embed_dim = 768,
+            depth = 12,
+            num_heads = 12,
+            mlp_ratio = 4,
+            drop_rate=0.1,
+            drop_path_rate=0.1
         )
     elif arch_name == 'vit_m_decoupled':
         return SimpleViTDecoupledLN(

@@ -5,12 +5,12 @@
 
 # Lines that begin with #SBATCH specify commands to be used by SLURM for scheduling
 #SBATCH --job-name=vits                               # sets the job name if not set from environment
-#SBATCH --array=222-223                   # Submit 8 array jobs, throttling to 4 at a time
-#SBATCH --output logs/vitsv2_cache_hyper_%A_%a.log                            # indicates a file to redirect STDOUT to; %j is the jobid, _%A_%a is array task id
-#SBATCH --error logs/vitsv2_cache_hyper_%A_%a.log                             # indicates a file to redirect STDERR to; %j is the jobid,_%A_%a is array task id
+#SBATCH --array=233                   # Submit 8 array jobs, throttling to 4 at a time
+#SBATCH --output logs/vits_imgnt1k_cache_hyper_%A_%a.log                            # indicates a file to redirect STDOUT to; %j is the jobid, _%A_%a is array task id
+#SBATCH --error logs/vits_imgnt1k_cache_hyper_%A_%a.log                             # indicates a file to redirect STDERR to; %j is the jobid,_%A_%a is array task id
 #SBATCH --account=all
 #SBATCH --ntasks=8
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=8
 #SBATCH --gpus-per-task=1
 #SBATCH --partition=lowpri
 #SBATCH --nice=0                                              #positive means lower priority
@@ -36,7 +36,7 @@ echo "MASTER_ADDR="$master_addr
 export MASTER_PORT=$((12000 + $RANDOM % 20000))
 
 source ~/miniconda/etc/profile.d/conda.sh
-conda activate ffcv
+conda activate ffcv_v2
 
 command_list[0]="python train_imagenet.py --config-file configs/vit_100cls_advinput_triple.yaml --adv.radius_input=0.01 --adv.step_size_input=0.01 --logging.folder output/nomixup_v3/vit_advinput0.01_triple --data.num_workers=4 --dist.world_size=$SLURM_NTASKS --dist.multinode=1 --dist.port=$MASTER_PORT --dist.address=$master_addr"
 command_list[1]="python train_imagenet.py --config-file configs/vit_100cls_advinput_triple.yaml --adv.radius_input=0.02 --adv.step_size_input=0.02 --logging.folder output/nomixup_v3/vit_advinput0.02_triple --data.num_workers=4 --dist.world_size=$SLURM_NTASKS --dist.multinode=1 --dist.port=$MASTER_PORT --dist.address=$master_addr"
@@ -320,6 +320,27 @@ command_list[221]="python train_imagenet.py --config-file configs/vit_100cls_adv
 
 command_list[222]="python train_imagenet.py --config-file configs/vit_100cls_advinput_decoupled.yaml --adv.radius_input=1.000 --adv.step_size_input=0.050 --adv.adv_cache=1 --adv.cache_class_wise=1 --adv.cache_class_wise_shuffle_iter=100 --logging.project_name vit100 --logging.resume_id=vitaw --logging.folder output/nomixup_v3/ht/vit_advinput1.000_decoupled_cacheclasswiseshuffle100_s0.050 $SHARED_PARAM"
 command_list[223]="python train_imagenet.py --config-file configs/vit_100cls_advinput_decoupled.yaml --adv.radius_input=1.000 --adv.step_size_input=0.050 --adv.adv_cache=1 --adv.cache_class_wise=1 --adv.cache_class_wise_shuffle_iter=200 --logging.project_name vit100 --logging.resume_id=vitax --logging.folder output/nomixup_v3/ht/vit_advinput1.000_decoupled_cacheclasswiseshuffle200_s0.050 $SHARED_PARAM"
+
+# testing variations of epsilon schedules
+command_list[224]="python train_imagenet.py --config-file configs/vit_100cls_advinput_decoupled.yaml --adv.radius_input=1.000 --adv.step_size_input=0.050 --adv.adv_cache=1 --adv.radius_schedule=1 --radius.min_multiplier=0 --radius.start_epoch=30 --radius.schedule_type=linear_decrease                                         --logging.project_name vit100 --logging.resume_id=vitba --logging.folder output/nomixup_v3/ht/vit_advinput1.000-0.1-at-ep30_decoupled_cache_s0.05 $SHARED_PARAM"
+command_list[225]="python train_imagenet.py --config-file configs/vit_100cls_advinput_decoupled.yaml --adv.radius_input=1.000 --adv.step_size_input=0.050 --adv.adv_cache=1 --adv.radius_schedule=1 --radius.max_multiplier=2 --radius.min_multiplier=0 --radius.period_count=5 --radius.start_epoch=30 --radius.schedule_type=wave  --logging.project_name vit100 --logging.resume_id=vitbb --logging.folder output/nomixup_v3/ht/vit_advinput1.000-wave-p5-max2-min0-at-ep30_decoupled_cache_s0.05 $SHARED_PARAM"
+command_list[226]="python train_imagenet.py --config-file configs/vit_100cls_advinput_decoupled.yaml --adv.radius_input=1.000 --adv.step_size_input=0.050 --adv.adv_cache=1 --adv.radius_schedule=1 --radius.max_multiplier=2 --radius.min_multiplier=0 --radius.period_count=3 --radius.start_epoch=30 --radius.schedule_type=wave  --logging.project_name vit100 --logging.resume_id=vitbc --logging.folder output/nomixup_v3/ht/vit_advinput1.000-wave-p3-max2-min0-at-ep30_decoupled_cache_s0.05 $SHARED_PARAM"
+command_list[227]="python train_imagenet.py --config-file configs/vit_100cls_advinput_decoupled.yaml --adv.radius_input=1.000 --adv.step_size_input=0.050 --adv.adv_cache=1 --adv.radius_schedule=1 --radius.max_multiplier=2 --radius.min_multiplier=0 --radius.period_count=2 --radius.start_epoch=30 --radius.schedule_type=wave  --logging.project_name vit100 --logging.resume_id=vitbd --logging.folder output/nomixup_v3/ht/vit_advinput1.000-wave-p2-max2-min0-at-ep30_decoupled_cache_s0.05 $SHARED_PARAM"
+
+command_list[228]="python train_imagenet.py --config-file configs/vit_100cls_advinput_decoupled.yaml --adv.radius_input=1.000 --adv.step_size_input=0.050 --adv.adv_cache=1 --adv.radius_schedule=1 --radius.max_multiplier=2   --radius.min_multiplier=0   --radius.period_count=5 --radius.start_epoch=30 --radius.schedule_type=teeth                            --logging.project_name vit100 --logging.resume_id=vitbe --logging.folder output/nomixup_v3/ht/vit_advinput1.000-teeth-p5-max2-min0-at-ep30_decoupled_cache_s0.05 $SHARED_PARAM"
+command_list[229]="python train_imagenet.py --config-file configs/vit_100cls_advinput_decoupled.yaml --adv.radius_input=1.000 --adv.step_size_input=0.050 --adv.adv_cache=1 --adv.radius_schedule=1 --radius.max_multiplier=2   --radius.min_multiplier=0   --radius.period_count=5 --radius.start_epoch=30 --radius.schedule_type=teeth --radius.reset_layernorm=1 --logging.project_name vit100 --logging.resume_id=vitbf --logging.folder output/nomixup_v3/ht/vit_advinput1.000-teeth-reln-p5-max2-min0-at-ep30_decoupled_cache_s0.05 $SHARED_PARAM"
+command_list[230]="python train_imagenet.py --config-file configs/vit_100cls_advinput_decoupled.yaml --adv.radius_input=1.000 --adv.step_size_input=0.050 --adv.adv_cache=1 --adv.radius_schedule=1 --radius.max_multiplier=1.5 --radius.min_multiplier=0.5 --radius.period_count=5 --radius.start_epoch=30 --radius.schedule_type=wave                             --logging.project_name vit100 --logging.resume_id=vitbg --logging.folder output/nomixup_v3/ht/vit_advinput1.000-wave-p5-max1.5-min0.5-at-ep30_decoupled_cache_s0.05 $SHARED_PARAM"
+command_list[231]="python train_imagenet.py --config-file configs/vit_100cls_advinput_decoupled.yaml --adv.radius_input=1.000 --adv.step_size_input=0.050 --adv.adv_cache=1 --adv.radius_schedule=1 --radius.max_multiplier=2   --radius.min_multiplier=0   --radius.period_count=10 --radius.start_epoch=30 --radius.schedule_type=teeth --radius.reset_layernorm=1 --logging.project_name vit100 --logging.resume_id=vitbh --logging.folder output/nomixup_v3/ht/vit_advinput1.000-teeth-reln-p10-max2-min0-at-ep30_decoupled_cache_s0.05 $SHARED_PARAM"
+
+# testing simple vit with randaug + mixup
+SHARED_PARAM="--dist.world_size=$SLURM_NTASKS --dist.multinode=1 --dist.port=$MASTER_PORT --dist.address=$master_addr"
+PYRAMID_PARAM="--training.mixup=1 --training.randaug=1 --training.randaug_num_ops=2 --training.randaug_magnitude=10 --training.mixed_precision=0 --lr.warmup_epochs=4 --model.arch=vit_s"
+command_list[232]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls.yaml $PYRAMID_PARAM                                                                                                                                         --logging.project_name imgnt1K --logging.resume_id=vits1000epoch300arv3 --logging.folder output/pyramid/simplevits_baseline $SHARED_PARAM"
+
+# testing simple vit with randaug + mixup without label smoothing
+SHARED_PARAM="--dist.world_size=$SLURM_NTASKS --dist.multinode=1 --dist.port=$MASTER_PORT --dist.address=$master_addr --training.label_smoothing=0"
+PYRAMID_PARAM="--training.mixup=1 --training.randaug=1 --training.randaug_num_ops=2 --training.randaug_magnitude=10 --training.mixed_precision=0 --lr.warmup_epochs=4 --model.arch=vit_s"
+command_list[233]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls.yaml $PYRAMID_PARAM                                                                                                                                         --logging.project_name imgnt1K --logging.resume_id=vits1000epoch300asv3 --logging.folder output/pyramid/simplevits_baseline_nosmooth $SHARED_PARAM"
 
 cur_command=${command_list[SLURM_ARRAY_TASK_ID]}
 echo $cur_command

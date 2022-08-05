@@ -52,7 +52,7 @@ from ffcv.fields.rgb_image import CenterCropRGBImageDecoder, \
     RandomResizedCropRGBImageDecoder
 from ffcv.fields.basics import IntDecoder
 from models.mvit_decoupled import LayerNormDecoupled
-
+from timm.models.vision_transformer import VisionTransformer
 Section('model', 'model details').params(
     arch=Param(str, default='resnet18'),
     pretrained=Param(int, 'is pretrained? (1/0)', default=0)
@@ -116,14 +116,13 @@ Section('training', 'training hyper param stuff').params(
     distributed=Param(int, 'is distributed?', default=0),
     use_blurpool=Param(int, 'use blurpool?', default=0),
     freeze_nonlayernorm_epochs=Param(int, 'use blurpool?', default=None),
+    mixed_precision=Param(int, 'whether to use mixed precision training', default=1),
 )
 
 Section('adv', 'hyper parameter related to adversarial training').params(
     num_steps=Param(int, 'number of adversarial steps'),
     radius_input=Param(float, 'adversarial radius'),
     radius_schedule=Param(int, 'whether to vary the radius according to a schedule', default=0),
-    max_radius_multiplier=Param(float, 'maximum radius multiplier', default=1),
-    start_epoch=Param(int, 'epochs where one start to increase the radius'),
     step_size_input=Param(float, 'step size for adversarial step'),
     adv_features=Param(DictChecker(), 'attacked feature layers'),
     adv_loss_weight=Param(float, 'weight assigned to adversarial loss'),
@@ -140,6 +139,13 @@ Section('adv', 'hyper parameter related to adversarial training').params(
     pyramid=Param(float, 'whether to use class wise universal perturbation', default=0),
     optimizer=Param(str, 'optimizer used to optimizer the image'),
     lr=Param(float, 'optimizer used to optimizer the image'),
+)
+Section('radius', 'hyperparameters related to radius scheduling').params(
+    schedule_type=Param(str, 'linear_increase, wave, linear decrease'),
+    start_epoch=Param(int, 'epochs where one start to implement the radius schedule'),
+    period_count=Param(int, 'number of periods within the wave schedule'),
+    min_multiplier=Param(float, 'minimum radius during schedules'),
+    max_multiplier=Param(float, 'maximum radius multiplier during schedule')
 )
 Section('sam', 'hyper parameter related to sam training').params(
     radius=Param(float, 'adversarial radius'),
@@ -188,14 +194,83 @@ def get_step_lr(epoch, lr, step_ratio, step_length, epochs):
     num_steps = epoch // step_length
     return step_ratio**num_steps * lr
 
-@param('adv.max_radius_multiplier')
-@param('adv.start_epoch')
+@param('radius.schedule_type')
+def get_radius_multiplier(epoch, schedule_type=None):
+    if schedule_type is None:
+        return 1
+    if schedule_type == 'linear_increase':
+        return get_radius_multiplier_linear_increase(epoch)
+    elif schedule_type == 'linear_decrease':
+        return get_radius_multiplier_linear_decrease(epoch)
+    elif schedule_type == 'wave':
+        return get_radius_multiplier_wave(epoch)
+    elif schedule_type == 'teeth':
+        return get_radius_multiplier_teeth(epoch)
+
+@param('radius.max_multiplier')
+@param('radius.start_epoch')
 @param('training.epochs')
-def get_radius_multiplier(epoch, start_epoch, max_radius_multiplier, epochs):
+def get_radius_multiplier_linear_increase(epoch, start_epoch, max_multiplier, epochs):
     if epoch < start_epoch:
         return 1
-    
-    return 1 + (epoch - start_epoch) / epochs * (max_radius_multiplier -1)
+    return 1 + (epoch - start_epoch) / epochs * (max_multiplier -1)
+
+
+@param('radius.min_multiplier')
+@param('radius.start_epoch')
+@param('training.epochs')
+def get_radius_multiplier_linear_decrease(epoch, start_epoch, min_multiplier, epochs):
+    if epoch < start_epoch:
+        return 1
+    return 1 + (epoch - start_epoch) / epochs * (min_multiplier -1)
+
+@param('radius.start_epoch')
+@param('training.epochs')
+@param('radius.max_multiplier')
+@param('radius.min_multiplier')
+@param('radius.period_count')
+def get_radius_multiplier_wave(epoch, start_epoch, max_multiplier, min_multiplier, epochs, period_count):
+    if epoch < start_epoch:
+        return 1   
+    epoch_per_period = (epochs-start_epoch)//period_count
+    epoch_within_a_period = (epoch - start_epoch) % epoch_per_period
+    phase_length = epoch_per_period/4
+    if epoch_within_a_period <= phase_length:
+        return 1+(max_multiplier - 1)*epoch_within_a_period/phase_length
+    elif epoch_within_a_period <= phase_length*3:
+        return max_multiplier - (max_multiplier - min_multiplier)*(epoch_within_a_period-phase_length)/(phase_length*2)
+    elif epoch_within_a_period <= phase_length*4:
+        return min_multiplier + (1 - min_multiplier)*(epoch_within_a_period-phase_length*3)/phase_length
+
+@param('radius.start_epoch')
+@param('training.epochs')
+@param('radius.max_multiplier')
+@param('radius.min_multiplier')
+@param('radius.period_count')
+def get_radius_multiplier_teeth(epoch, start_epoch, max_multiplier, min_multiplier, epochs, period_count):
+    if epoch < start_epoch:
+        return 1
+
+    epoch_per_period = (epochs-start_epoch)//period_count
+    epoch_within_period = (epoch-start_epoch)%epoch_per_period
+    if epoch < epoch_per_period + start_epoch:
+        return 1+(max_multiplier-1)*epoch_within_period/epoch_per_period
+    else:
+        return min_multiplier+(max_multiplier-min_multiplier)*epoch_within_period/epoch_per_period
+
+@param('radius.start_epoch')
+@param('training.epochs')
+@param('radius.period_count')
+def reset_layernorm_check(epoch, start_epoch,  epochs, period_count):
+
+    epoch_per_period = (epochs-start_epoch)//period_count
+    epoch_within_period = (epoch-start_epoch)%epoch_per_period
+    if epoch_within_period == 0 and epoch >= start_epoch + epoch_per_period:
+        return True
+    else:
+        return False
+
+
 
 @param('lr.lr')
 @param('lr.step_ratio')
@@ -463,21 +538,23 @@ class ImageNetTrainer:
     @param('training.randaug')
     @param('training.randaug_num_ops')
     @param('training.randaug_magnitude')
+    @param('training.mixed_precision')
     def create_train_loader(self, train_dataset, num_workers, batch_size,
-                            distributed, in_memory, mixup, randaug=False, randaug_num_ops=None, randaug_magnitude=None):
+                            distributed, in_memory, mixup, randaug=False, randaug_num_ops=None, randaug_magnitude=None, mixed_precision=True):
         this_device = f'cuda:{self.gpu}'
         train_path = Path(train_dataset)
         assert train_path.is_file()
 
         res = self.get_resolution(epoch=0)
         self.decoder = RandomResizedCropRGBImageDecoder((res, res))
+        
         image_pipeline: List[Operation] = [
             self.decoder,
             RandomHorizontalFlip(),
             ToTensor(),
             ToDevice(ch.device(this_device), non_blocking=True),
             ToTorchImage(),
-            NormalizeImage(IMAGENET_MEAN, IMAGENET_STD, np.float16)
+            NormalizeImage(IMAGENET_MEAN, IMAGENET_STD, np.float16) if mixed_precision else NormalizeImage(IMAGENET_MEAN, IMAGENET_STD, np.float32)
         ]
 
         label_pipeline: List[Operation] = [
@@ -493,7 +570,6 @@ class ImageNetTrainer:
             label_pipeline.insert(1, mixup_label)
         elif randaug:
             image_pipeline.insert(2, ffcv.transforms.RandAugment(num_ops=randaug_num_ops, magnitude=randaug_magnitude))
-        assert (mixup and randaug) == False # cannot apply both mixup and rand augmentation simultaneously
         order = OrderOption.RANDOM if distributed else OrderOption.QUASI_RANDOM
         loader = Loader(train_dataset,
                         batch_size=batch_size,
@@ -514,8 +590,9 @@ class ImageNetTrainer:
     @param('validation.batch_size')
     @param('validation.resolution')
     @param('training.distributed')
+    @param('training.mixed_precision')
     def create_val_loader(self, val_dataset, num_workers, batch_size,
-                          resolution, distributed):
+                          resolution, distributed, mixed_precision=1):
         this_device = f'cuda:{self.gpu}'
         val_path = Path(val_dataset)
         assert val_path.is_file()
@@ -526,7 +603,7 @@ class ImageNetTrainer:
             ToTensor(),
             ToDevice(ch.device(this_device), non_blocking=True),
             ToTorchImage(),
-            NormalizeImage(IMAGENET_MEAN, IMAGENET_STD, np.float16)
+            NormalizeImage(IMAGENET_MEAN, IMAGENET_STD, np.float16) if mixed_precision else NormalizeImage(IMAGENET_MEAN, IMAGENET_STD, np.float32)
         ]
 
         label_pipeline = [
@@ -553,7 +630,7 @@ class ImageNetTrainer:
     @param('logging.log_level')
     @param('logging.save_checkpoint_interval')
     @param('training.freeze_nonlayernorm_epochs')
-    def train(self, epochs, log_level, save_checkpoint_interval, freeze_nonlayernorm_epochs=None):
+    def train(self, epochs, log_level, save_checkpoint_interval, freeze_nonlayernorm_epochs=None, reset_layernorm=False):
         for epoch in range(self.starting_epoch, epochs):
             self.cur_epoch = epoch
             res = self.get_resolution(epoch)
@@ -617,7 +694,8 @@ class ImageNetTrainer:
                 wandb.log(dict({
                 'current_lr': self.optimizer.param_groups[0]['lr'],
                 'val_time': val_time,
-                'epoch_time': (time.time() - self.last_log_time)/60
+                'epoch_time': (time.time() - self.last_log_time)/60,
+                'radius_multiplier': get_radius_multiplier(self.cur_epoch)
                 }, **extra_dict, **stats, **self.best_stats), step=extra_dict['epoch']
                 )
                 self.last_log_time = time.time()
@@ -809,15 +887,16 @@ class ImageNetTrainer:
     @param('adv.adv_cache')
     @param('adv.optimizer')
     @param('adv.lr')
+    @param('training.mixed_precision')
     def adv_step(self, model, images, target,
-        num_steps=None, step_size_input=None, radius_input=None, adv_features=None, aux_branch=False, adv_cache=False, optimizer='pgd', lr=None, beta=0.9):
+        num_steps=None, step_size_input=None, radius_input=None, adv_features=None, aux_branch=False, adv_cache=False, optimizer='pgd', lr=None, beta=0.9, mixed_precision=True):
         if adv_cache:
             return self.adv_cache(images, target)
         input_adv_noise = ch.zeros_like(images, requires_grad=True)
         feature_adv_noise = FeatureNoise({int(layer): None for layer in adv_features} if adv_features is not None else {})
         for step in range(num_steps):
-            with autocast():
-                if isinstance(self.model.module, ResNet):
+            with autocast(enabled=bool(mixed_precision)):
+                if isinstance(self.model.module, ResNet) or isinstance(self.model.module, VisionTransformer):
                     output = self.model(images+input_adv_noise) # resnet doesn't support feature noise
                 else:
                     if aux_branch == False:
@@ -870,8 +949,10 @@ class ImageNetTrainer:
     @param('adv.freeze_layers')
     @param('sam.radius')
     @param('training.fixed_dropout')
+    @param('training.mixed_precision')
     @param('adv.split_backward')
-    def train_loop(self, epoch, log_level, grad_clip_norm=None, num_steps=0, adv_loss_weight=0, radius=0, fixed_dropout=False, freeze_layers=None, split_backward=False, freeze_nonlayernorm=False, adv_loss_even=False): 
+    def train_loop(self, epoch, log_level, grad_clip_norm=None, num_steps=0, adv_loss_weight=0, radius=0, fixed_dropout=False, freeze_layers=None, split_backward=False, 
+    freeze_nonlayernorm=False, adv_loss_even=False, mixed_precision=True): 
         model = self.model
         model.train()
         losses = []
@@ -897,7 +978,7 @@ class ImageNetTrainer:
                 images_adv, features_adv = self.adv_step(self.model, images, target)
             if fixed_dropout:
                 fixed_seed = ch.randint(0, 999999, size=(1,), device=images.device)
-            with autocast():
+            with autocast(enabled=bool(mixed_precision)):
                 if sam:
                     with self.model.no_sync():
                         if fixed_dropout:
@@ -931,7 +1012,7 @@ class ImageNetTrainer:
                     if hasattr(self.model.module, 'make_adv'):
                         self.model.module.make_adv()
                                         
-                    if isinstance(self.model.module, ResNet):
+                    if isinstance(self.model.module, ResNet) or isinstance(self.model.module, VisionTransformer):
                         output_adv = self.model(images+images_adv)
                     else:
                         output_adv = self.model(images+images_adv, feature_noise=features_adv, freeze_layers=freeze_layers)
@@ -1010,7 +1091,8 @@ class ImageNetTrainer:
 
     @param('validation.lr_tta')
     @param('eval.layernorm_switch')
-    def val_loop(self, lr_tta, layernorm_switch):
+    @param('training.mixed_precision')
+    def val_loop(self, lr_tta, layernorm_switch, mixed_precision=True):
         model = self.model
         model.eval()
         stats = {}
@@ -1024,7 +1106,7 @@ class ImageNetTrainer:
                             module.make_adv(factor=factor)
                     
                     with ch.no_grad():
-                        with autocast():
+                        with autocast(enabled=bool(mixed_precision)):
                             for images, target in tqdm(self.val_loader):
                                 output = self.model(images)
                                 if lr_tta:
@@ -1052,7 +1134,7 @@ class ImageNetTrainer:
                             module.make_adv(factor=factor)
                     
                     with ch.no_grad():
-                        with autocast():
+                        with autocast(enabled=bool(mixed_precision)):
                             for images, target in tqdm(self.val_loader):
                                 output = self.model(images)
                                 if lr_tta:
@@ -1074,7 +1156,7 @@ class ImageNetTrainer:
                         module.make_adv(factor=best_factor_curlayer)
 
             with ch.no_grad():
-                with autocast():
+                with autocast(enabled=bool(mixed_precision)):
                     for images, target in tqdm(self.val_loader):
                         output = self.model(images)
                         if lr_tta:
@@ -1091,7 +1173,7 @@ class ImageNetTrainer:
         if isinstance(self.model.module, SimpleViTDecoupledLN) or isinstance(self.model.module, MViTDecoupled) :
             self.model.module.make_clean()
         with ch.no_grad():
-            with autocast():
+            with autocast(enabled=bool(mixed_precision)):
                 for images, target in tqdm(self.val_loader):
                     output = self.model(images)
                     if lr_tta:
