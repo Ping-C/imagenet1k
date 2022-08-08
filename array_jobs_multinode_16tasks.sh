@@ -5,16 +5,16 @@
 
 # Lines that begin with #SBATCH specify commands to be used by SLURM for scheduling
 #SBATCH --job-name=img1k                                # sets the job name if not set from environment
-#SBATCH --array=29                       # Submit 8 array jobs, throttling to 4 at a time
+#SBATCH --array=34                       # Submit 8 array jobs, throttling to 4 at a time
 #SBATCH --output logs/imgnt1k_%A_%a.log                            # indicates a file to redirect STDOUT to; %j is the jobid, _%A_%a is array task id
 #SBATCH --error logs/imgnt1k_%A_%a.log                             # indicates a file to redirect STDERR to; %j is the jobid,_%A_%a is array task id
 #SBATCH --account=all
 #SBATCH --ntasks=16
 #SBATCH --gpus-per-task=1
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=8
 #SBATCH --partition=lowpri
 #SBATCH --nice=0                                              #positive means lower priority
-###SBATCH --exclude=a100-st-p4d24xlarge-280,a100-st-p4d24xlarge-49
+#SBATCH --exclude=a100-st-p4d24xlarge-33,a100-st-p4d24xlarge-65,a100-st-p4d24xlarge-213,a100-st-p4d24xlarge-278,a100-st-p4d24xlarge-159,a100-st-p4d24xlarge-265,a100-st-p4d24xlarge-232
 
 
 
@@ -36,7 +36,7 @@ echo "MASTER_ADDR="$master_addr
 export MASTER_PORT=$((12000 + $RANDOM % 20000))
 
 source ~/miniconda/etc/profile.d/conda.sh
-conda activate ffcv
+conda activate ffcv_v2
 
 command_list[0]="python train_imagenet.py --config-file configs/mvit_decoupled/mvits_1000cls_baseline.yaml --logging.folder outputs/imgnt1k/baseline --dist.world_size=$SLURM_NTASKS --dist.multinode=1 --dist.port=$MASTER_PORT --dist.address=$master_addr"
 command_list[1]="python train_imagenet.py --config-file configs/mvit_decoupled/mvits_1000cls_advinput_decoupled.yaml --adv.radius_input 0.05 --adv.step_size_input 0.05 --logging.folder outputs/imgnt1k/decoupled_0.05 --dist.world_size=$SLURM_NTASKS --dist.multinode=1 --dist.port=$MASTER_PORT --dist.address=$master_addr"
@@ -76,6 +76,30 @@ command_list[28]="python train_imagenet.py --config-file configs/mvit_decoupled/
 command_list[29]="python train_imagenet.py --config-file configs/mvit_decoupled/mvits_1000cls_advinput_decoupled.yaml --logging.project_name imgnt1K --logging.resume_id=ad --adv.radius_input 0.02 --adv.step_size_input 0.007 --adv.num_steps 3                   --logging.folder outputs_requeue_v2/imgnt1k/decoupled_r0.02_s0.007c3     --dist.world_size=$SLURM_NTASKS --dist.multinode=1 --dist.port=$MASTER_PORT --dist.address=$master_addr"
 command_list[30]="python train_imagenet.py --config-file configs/mvit_decoupled/mvits_1000cls_advinput_decoupled.yaml --logging.project_name imgnt1K --logging.resume_id=ae --adv.radius_input 0.02 --adv.step_size_input 0.012 --adv.num_steps 2                   --logging.folder outputs_requeue_v2/imgnt1k/decoupled_r0.02_s0.012c2     --dist.world_size=$SLURM_NTASKS --dist.multinode=1 --dist.port=$MASTER_PORT --dist.address=$master_addr"
 command_list[31]="python train_imagenet.py --config-file configs/mvit_decoupled/mvits_1000cls_advinput_decoupled.yaml --logging.project_name imgnt1K --logging.resume_id=af --adv.radius_input 0.02 --adv.step_size_input 0.020 --adv.num_steps 1                   --logging.folder outputs_requeue_v2/imgnt1k/decoupled_r0.02_s0.020c1     --dist.world_size=$SLURM_NTASKS --dist.multinode=1 --dist.port=$MASTER_PORT --dist.address=$master_addr"
+
+
+
+# testing simple vit with randaug + mixup without label smoothing with adam
+SHARED_PARAM="--dist.world_size=$SLURM_NTASKS --dist.multinode=1 --dist.port=$MASTER_PORT --dist.address=$master_addr"
+PYRAMID_PARAM="--training.mixup=1 --training.randaug=1 --training.randaug_num_ops=2 --training.randaug_magnitude=10 --training.mixed_precision=0 --training.batch_size=64 --data.num_workers=8 --lr.warmup_epochs=4 --model.arch=vit_s --training.label_smoothing=0 --training.optimizer=adam"
+command_list[32]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls.yaml $PYRAMID_PARAM                                                                                                                                         --logging.project_name imgnt1K --logging.resume_id=vits1000epoch300bqv3 --logging.folder output/pyramid/simplevits_baseline_v4_fast $SHARED_PARAM"
+
+
+# testing simple vit with randaug + mixup without label smoothing with adam
+SHARED_PARAM="--dist.world_size=$SLURM_NTASKS --dist.multinode=1 --dist.port=$MASTER_PORT --dist.address=$master_addr"
+PYRAMID_PARAM="--training.mixup=1 --training.randaug=1 --training.randaug_num_ops=2 --training.randaug_magnitude=10 --training.mixed_precision=0 --training.batch_size=64 --data.num_workers=8 --lr.warmup_epochs=4 --model.arch=vit_s --training.label_smoothing=0 --training.optimizer=adam --training.altnorm=1"
+command_list[33]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls.yaml $PYRAMID_PARAM                                                                                                                                         --logging.project_name imgnt1K --logging.resume_id=vits1000epoch300brv3 --logging.folder output/pyramid/simplevits_baseline_v5_altnorm_fast $SHARED_PARAM"
+
+
+# testing simple vit with randaug + mixup without label smoothing with adam
+SHARED_PARAM="--dist.world_size=$SLURM_NTASKS --dist.multinode=1 --dist.port=$MASTER_PORT --dist.address=$master_addr"
+PYRAMID_PARAM="--training.mixup=1 --training.randaug=1 --training.randaug_num_ops=2 --training.randaug_magnitude=10 --training.mixed_precision=0 --training.batch_size=64 --data.num_workers=8 --lr.warmup_epochs=4 --model.arch=vit_s --training.label_smoothing=0 --training.altnorm=1"
+command_list[34]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls.yaml $PYRAMID_PARAM                                                                                                                                         --logging.project_name imgnt1K --logging.resume_id=vits1000epoch300bsv3 --logging.folder output/pyramid/simplevits_baseline_v6_noadam_fast $SHARED_PARAM"
+
+# testing simple vit with randaug + mixup without label smoothing with adam
+SHARED_PARAM="--dist.world_size=$SLURM_NTASKS --dist.multinode=1 --dist.port=$MASTER_PORT --dist.address=$master_addr"
+PYRAMID_PARAM="--training.mixup=1 --training.randaug=1 --training.randaug_num_ops=2 --training.randaug_magnitude=10 --training.mixed_precision=0 --training.batch_size=64 --data.num_workers=8 --lr.warmup_epochs=4 --model.arch=vit_b\ --training.altnorm=1"
+command_list[35]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls.yaml $PYRAMID_PARAM                                                                                                                                         --logging.project_name imgnt1K --logging.resume_id=vits1000epoch300btv3 --logging.folder output/pyramid/simplevitb_baseline_v1fast $SHARED_PARAM"
 
 # jobs for adversarial finetuning
 cur_command=${command_list[SLURM_ARRAY_TASK_ID]}

@@ -117,6 +117,7 @@ Section('training', 'training hyper param stuff').params(
     use_blurpool=Param(int, 'use blurpool?', default=0),
     freeze_nonlayernorm_epochs=Param(int, 'use blurpool?', default=None),
     mixed_precision=Param(int, 'whether to use mixed precision training', default=1),
+    altnorm=Param(int, 'whether to use alternative normalization', default=0),
 )
 
 Section('adv', 'hyper parameter related to adversarial training').params(
@@ -165,6 +166,9 @@ Section('eval', 'special eval flags').params(
 
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406]) * 255
 IMAGENET_STD = np.array([0.229, 0.224, 0.225]) * 255
+
+IMAGENET_MEAN_ALT = np.array([0.5, 0.5, 0.5]) * 255
+IMAGENET_STD_ALT = np.array([0.5, 0.5, 0.5]) * 255
 DEFAULT_CROP_RATIO = 224/256
 
 # from collections.abc import MutableMapping
@@ -539,22 +543,25 @@ class ImageNetTrainer:
     @param('training.randaug_num_ops')
     @param('training.randaug_magnitude')
     @param('training.mixed_precision')
+    @param('training.altnorm')
     def create_train_loader(self, train_dataset, num_workers, batch_size,
-                            distributed, in_memory, mixup, randaug=False, randaug_num_ops=None, randaug_magnitude=None, mixed_precision=True):
+                            distributed, in_memory, mixup, randaug=False, randaug_num_ops=None, randaug_magnitude=None, mixed_precision=True,
+                            altnorm=False):
         this_device = f'cuda:{self.gpu}'
         train_path = Path(train_dataset)
         assert train_path.is_file()
 
         res = self.get_resolution(epoch=0)
         self.decoder = RandomResizedCropRGBImageDecoder((res, res))
-        
+        mean = IMAGENET_MEAN_ALT if altnorm else IMAGENET_MEAN
+        std = IMAGENET_STD_ALT if altnorm else IMAGENET_STD
         image_pipeline: List[Operation] = [
             self.decoder,
             RandomHorizontalFlip(),
             ToTensor(),
             ToDevice(ch.device(this_device), non_blocking=True),
             ToTorchImage(),
-            NormalizeImage(IMAGENET_MEAN, IMAGENET_STD, np.float16) if mixed_precision else NormalizeImage(IMAGENET_MEAN, IMAGENET_STD, np.float32)
+            NormalizeImage(mean, std, np.float16) if mixed_precision else NormalizeImage(mean, std, np.float32)
         ]
 
         label_pipeline: List[Operation] = [
@@ -591,19 +598,22 @@ class ImageNetTrainer:
     @param('validation.resolution')
     @param('training.distributed')
     @param('training.mixed_precision')
+    @param('training.altnorm')
     def create_val_loader(self, val_dataset, num_workers, batch_size,
-                          resolution, distributed, mixed_precision=1):
+                          resolution, distributed, mixed_precision=1, altnorm=False):
         this_device = f'cuda:{self.gpu}'
         val_path = Path(val_dataset)
         assert val_path.is_file()
         res_tuple = (resolution, resolution)
         cropper = CenterCropRGBImageDecoder(res_tuple, ratio=DEFAULT_CROP_RATIO)
+        mean = IMAGENET_MEAN_ALT if altnorm else IMAGENET_MEAN
+        std = IMAGENET_STD_ALT if altnorm else IMAGENET_STD
         image_pipeline = [
             cropper,
             ToTensor(),
             ToDevice(ch.device(this_device), non_blocking=True),
             ToTorchImage(),
-            NormalizeImage(IMAGENET_MEAN, IMAGENET_STD, np.float16) if mixed_precision else NormalizeImage(IMAGENET_MEAN, IMAGENET_STD, np.float32)
+            NormalizeImage(mean, std, np.float16) if mixed_precision else NormalizeImage(mean, std, np.float32)
         ]
 
         label_pipeline = [

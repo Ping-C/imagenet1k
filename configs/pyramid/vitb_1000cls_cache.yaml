@@ -41,5 +41,5 @@ adv:
   split_backward: 1
 validation:
   batch_size: 64
-  lr_tta: true
+  lr_tta: 1
   resolution: 224
