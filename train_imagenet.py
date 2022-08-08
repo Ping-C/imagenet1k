@@ -568,7 +568,7 @@ class ImageNetTrainer:
             mixup_label = ffcv.transforms.LabelMixup(0.2, True)
             image_pipeline.insert(2, mixup_img)
             label_pipeline.insert(1, mixup_label)
-        elif randaug:
+        if randaug:
             image_pipeline.insert(2, ffcv.transforms.RandAugment(num_ops=randaug_num_ops, magnitude=randaug_magnitude))
         order = OrderOption.RANDOM if distributed else OrderOption.QUASI_RANDOM
         loader = Loader(train_dataset,
