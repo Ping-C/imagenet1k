@@ -35,7 +35,7 @@ from random import randrange
 import wandb
 from torchvision.models import ResNet
 from torchvision.utils import make_grid
-
+from augmentations import Warp
 class DictChecker(Checker):
     def check(self, value):
         return json.loads(value)
@@ -140,6 +140,13 @@ Section('adv', 'hyper parameter related to adversarial training').params(
     pyramid=Param(float, 'whether to use class wise universal perturbation', default=0),
     optimizer=Param(str, 'optimizer used to optimizer the image'),
     lr=Param(float, 'optimizer used to optimizer the image'),
+)
+
+Section('adv_augment', 'hyper parameter related to adversarial augmentation training').params(
+    adv_augment_on=Param(int, 'turn on adversarial augment', default=0),
+    radius=Param(float, 'adversarial radius'),
+    step_size=Param(float, 'adversarial step size'),
+    random=Param(int, 'random augmentation as opposed to adversarial', default=0),
 )
 Section('radius', 'hyperparameters related to radius scheduling').params(
     schedule_type=Param(str, 'linear_increase, wave, linear decrease'),
@@ -337,7 +344,9 @@ class ImageNetTrainer:
     @param('logging.resume_checkpoint')
     @param('logging.usewb')
     @param('logging.project_name')
-    def __init__(self, rank, distributed, resume_id = None, convert=False, resume_checkpoint=None, usewb=False, project_name=None):
+    @param('adv_augment.adv_augment_on')
+    def __init__(self, rank, distributed, resume_id = None, convert=False, resume_checkpoint=None, usewb=False, project_name=None,
+    adv_augment_on=False):
         self.all_params = get_current_config()
         self.rank = rank
         self.gpu = self.rank % ch.cuda.device_count()
@@ -405,6 +414,15 @@ class ImageNetTrainer:
             self.usewb = True
         else:
             self.usewb = False
+        if adv_augment_on:
+            self.prepare_adversarial_augment()
+    
+    @param('adv_augment.radius')
+    @param('adv_augment.step_size')
+    @param('adv_augment.random')
+    def prepare_adversarial_augment(self, radius, step_size, random):
+        self.adv_augment = Warp(radius=radius, step_size=step_size, device=f'cuda:{self.gpu}', random=random)
+
     def convert(self, checkpoint_dict):
         convert_dict = dict()
         for k, v in checkpoint_dict.items():
@@ -981,6 +999,7 @@ class ImageNetTrainer:
                 param_group['lr'] = lrs[ix]
             self.optimizer.zero_grad(set_to_none=True)
 
+            
             # generate adversarial examples/intermediate adversarial examples
             if adv:
                 if hasattr(self.model.module, 'make_adv'):
@@ -1008,6 +1027,7 @@ class ImageNetTrainer:
                 
                 if hasattr(self.model.module, 'make_clean'):
                     self.model.module.make_clean()
+                
                 output = self.model(images)
                 loss_train = self.train_loss_func(output, target)
                 if split_backward:
@@ -1021,16 +1041,22 @@ class ImageNetTrainer:
                 if adv:
                     if hasattr(self.model.module, 'make_adv'):
                         self.model.module.make_adv()
-                                        
-                    if isinstance(self.model.module, ResNet) or isinstance(self.model.module, VisionTransformer):
-                        output_adv = self.model(images+images_adv)
+                    
+                    # generate adversarial data augmentation if it is a thing
+                    if hasattr(self, 'adv_augment'):
+                        self.adv_augment.update() # update adversarial data augmentation
+                        images_aug = self.adv_augment.augment(images)
                     else:
-                        output_adv = self.model(images+images_adv, feature_noise=features_adv, freeze_layers=freeze_layers)
+                        images_aug = images
+                    if isinstance(self.model.module, ResNet) or isinstance(self.model.module, VisionTransformer):
+                        output_adv = self.model(images_aug+images_adv)
+                    else:
+                        output_adv = self.model(images_aug+images_adv, feature_noise=features_adv, freeze_layers=freeze_layers)
                     if self.rank == 0:
                         # log some images to wandb
                         if ix == 0:
                             clean_img_arr = make_grid(images, normalize=True)
-                            adv_img_arr = make_grid(images+images_adv, normalize=True)
+                            adv_img_arr = make_grid(images_aug+images_adv, normalize=True)
                             clean_img = wandb.Image(clean_img_arr, caption="clean images")
                             adv_img = wandb.Image(adv_img_arr, caption="adv images")
                             wandb.log(

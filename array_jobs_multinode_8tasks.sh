@@ -5,16 +5,16 @@
 
 # Lines that begin with #SBATCH specify commands to be used by SLURM for scheduling
 #SBATCH --job-name=vits                               # sets the job name if not set from environment
-#SBATCH --array=235-236                   # Submit 8 array jobs, throttling to 4 at a time
-#SBATCH --output logs/vits_imgnt1k_cache_hyper_%A_%a.log                            # indicates a file to redirect STDOUT to; %j is the jobid, _%A_%a is array task id
-#SBATCH --error logs/vits_imgnt1k_cache_hyper_%A_%a.log                             # indicates a file to redirect STDERR to; %j is the jobid,_%A_%a is array task id
+#SBATCH --array=237-244                   # Submit 8 array jobs, throttling to 4 at a time
+#SBATCH --output logs/vits_100_%A_%a.log                            # indicates a file to redirect STDOUT to; %j is the jobid, _%A_%a is array task id
+#SBATCH --error logs/vits_100_%A_%a.log                             # indicates a file to redirect STDERR to; %j is the jobid,_%A_%a is array task id
 #SBATCH --account=all
 #SBATCH --ntasks=8
 #SBATCH --cpus-per-task=8
 #SBATCH --gpus-per-task=1
 #SBATCH --partition=lowpri
 #SBATCH --nice=0                                              #positive means lower priority
-#SBATCH --exclude=a100-st-p4d24xlarge-33,a100-st-p4d24xlarge-65,a100-st-p4d24xlarge-213,a100-st-p4d24xlarge-278
+#SBATCH --exclude=
 ## SBATCH --dependency=afterany:41100_182                                             #positive means lower priority
 
 
@@ -339,24 +339,29 @@ PYRAMID_PARAM="--training.mixup=1 --training.randaug=1 --training.randaug_num_op
 command_list[232]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls.yaml $PYRAMID_PARAM                                                                                                                                         --logging.project_name imgnt1K --logging.resume_id=vits1000epoch300arv3 --logging.folder output/pyramid/simplevits_baseline $SHARED_PARAM"
 
 # testing simple vit with randaug + mixup without label smoothing
-SHARED_PARAM="--dist.world_size=$SLURM_NTASKS --dist.multinode=1 --dist.port=$MASTER_PORT --dist.address=$master_addr"
 PYRAMID_PARAM="--training.mixup=1 --training.randaug=1 --training.randaug_num_ops=2 --training.randaug_magnitude=10 --training.mixed_precision=0 --lr.warmup_epochs=4 --model.arch=vit_s --training.label_smoothing=0"
 command_list[233]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls.yaml $PYRAMID_PARAM                                                                                                                                         --logging.project_name imgnt1K --logging.resume_id=vits1000epoch300atv3 --logging.folder output/pyramid/simplevits_baseline_nosmooth_rerun $SHARED_PARAM"
 
 # testing simple vit with randaug + mixup with label smoothing
-SHARED_PARAM="--dist.world_size=$SLURM_NTASKS --dist.multinode=1 --dist.port=$MASTER_PORT --dist.address=$master_addr"
 PYRAMID_PARAM="--training.mixup=1 --training.randaug=1 --training.randaug_num_ops=2 --training.randaug_magnitude=10 --training.mixed_precision=0 --lr.warmup_epochs=4 --model.arch=vit_s"
 command_list[234]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls.yaml $PYRAMID_PARAM                                                                                                                                         --logging.project_name imgnt1K --logging.resume_id=vits1000epoch300auv3 --logging.folder output/pyramid/simplevits_baseline_v2 $SHARED_PARAM"
 
 # testing simple vit with randaug + mixup without label smoothing
-SHARED_PARAM="--dist.world_size=$SLURM_NTASKS --dist.multinode=1 --dist.port=$MASTER_PORT --dist.address=$master_addr"
 PYRAMID_PARAM="--training.mixup=1 --training.randaug=1 --training.randaug_num_ops=2 --training.randaug_magnitude=10 --training.mixed_precision=0 --lr.warmup_epochs=4 --model.arch=vit_s --training.label_smoothing=0"
 command_list[235]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls.yaml $PYRAMID_PARAM                                                                                                                                         --logging.project_name imgnt1K --logging.resume_id=vits1000epoch300avv3 --logging.folder output/pyramid/simplevits_baseline_v3 $SHARED_PARAM"
 
 # testing simple vit with randaug + mixup without label smoothing with adam
-SHARED_PARAM="--dist.world_size=$SLURM_NTASKS --dist.multinode=1 --dist.port=$MASTER_PORT --dist.address=$master_addr"
 PYRAMID_PARAM="--training.mixup=1 --training.randaug=1 --training.randaug_num_ops=2 --training.randaug_magnitude=10 --training.mixed_precision=0 --lr.warmup_epochs=4 --model.arch=vit_s --training.label_smoothing=0 --training.optimizer=adam"
 command_list[236]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls.yaml $PYRAMID_PARAM                                                                                                                                         --logging.project_name imgnt1K --logging.resume_id=vits1000epoch300aqv3 --logging.folder output/pyramid/simplevits_baseline_v4 $SHARED_PARAM"
+
+command_list[237]="python train_imagenet.py --config-file configs/vit_100cls_advinput_decoupled.yaml --adv.radius_input=1.000 --adv.step_size_input=0.050 --adv.adv_cache=1 --training.mixup=0 --training.mixed_precision=0 --adv_augment.adv_augment_on=1 --adv_augment.radius=0.001 --adv_augment.step_size=0.0001 --adv_augment.random=0 --logging.project_name vit100 --logging.resume_id=vitea --logging.folder output/nomixup_v3/ht/vit_advinput1.000_decoupled_cache_s0.05_advaugr0.001 $SHARED_PARAM"
+command_list[238]="python train_imagenet.py --config-file configs/vit_100cls_advinput_decoupled.yaml --adv.radius_input=1.000 --adv.step_size_input=0.050 --adv.adv_cache=1 --training.mixup=0 --training.mixed_precision=0 --adv_augment.adv_augment_on=1 --adv_augment.radius=0.001 --adv_augment.step_size=0.0001 --adv_augment.random=1 --logging.project_name vit100 --logging.resume_id=viteb --logging.folder output/nomixup_v3/ht/vit_advinput1.000_decoupled_cache_s0.05_randaugr0.001 $SHARED_PARAM"
+command_list[239]="python train_imagenet.py --config-file configs/vit_100cls_advinput_decoupled.yaml --adv.radius_input=1.000 --adv.step_size_input=0.050 --adv.adv_cache=1 --training.mixup=0 --training.mixed_precision=0 --adv_augment.adv_augment_on=1 --adv_augment.radius=0.002 --adv_augment.step_size=0.0002 --adv_augment.random=0 --logging.project_name vit100 --logging.resume_id=vitec --logging.folder output/nomixup_v3/ht/vit_advinput1.000_decoupled_cache_s0.05_advaugr0.002 $SHARED_PARAM"
+command_list[240]="python train_imagenet.py --config-file configs/vit_100cls_advinput_decoupled.yaml --adv.radius_input=1.000 --adv.step_size_input=0.050 --adv.adv_cache=1 --training.mixup=0 --training.mixed_precision=0 --adv_augment.adv_augment_on=1 --adv_augment.radius=0.002 --adv_augment.step_size=0.0002 --adv_augment.random=1 --logging.project_name vit100 --logging.resume_id=vited --logging.folder output/nomixup_v3/ht/vit_advinput1.000_decoupled_cache_s0.05_randaugr0.002 $SHARED_PARAM"
+command_list[241]="python train_imagenet.py --config-file configs/vit_100cls_advinput_decoupled.yaml --adv.radius_input=1.000 --adv.step_size_input=0.050 --adv.adv_cache=1 --training.mixup=0 --training.mixed_precision=0 --adv_augment.adv_augment_on=1 --adv_augment.radius=0.005 --adv_augment.step_size=0.0005 --adv_augment.random=0 --logging.project_name vit100 --logging.resume_id=vitee --logging.folder output/nomixup_v3/ht/vit_advinput1.000_decoupled_cache_s0.05_advaugr0.005 $SHARED_PARAM"
+command_list[242]="python train_imagenet.py --config-file configs/vit_100cls_advinput_decoupled.yaml --adv.radius_input=1.000 --adv.step_size_input=0.050 --adv.adv_cache=1 --training.mixup=0 --training.mixed_precision=0 --adv_augment.adv_augment_on=1 --adv_augment.radius=0.005 --adv_augment.step_size=0.0005 --adv_augment.random=1 --logging.project_name vit100 --logging.resume_id=vitef --logging.folder output/nomixup_v3/ht/vit_advinput1.000_decoupled_cache_s0.05_randaugr0.005 $SHARED_PARAM"
+command_list[243]="python train_imagenet.py --config-file configs/vit_100cls_advinput_decoupled.yaml --adv.radius_input=1.000 --adv.step_size_input=0.050 --adv.adv_cache=1 --training.mixup=0 --training.mixed_precision=0 --adv_augment.adv_augment_on=1 --adv_augment.radius=0.010 --adv_augment.step_size=0.0010 --adv_augment.random=0 --logging.project_name vit100 --logging.resume_id=viteg --logging.folder output/nomixup_v3/ht/vit_advinput1.000_decoupled_cache_s0.05_advaugr0.01  $SHARED_PARAM"
+command_list[244]="python train_imagenet.py --config-file configs/vit_100cls_advinput_decoupled.yaml --adv.radius_input=1.000 --adv.step_size_input=0.050 --adv.adv_cache=1 --training.mixup=0 --training.mixed_precision=0 --adv_augment.adv_augment_on=1 --adv_augment.radius=0.010 --adv_augment.step_size=0.0010 --adv_augment.random=1 --logging.project_name vit100 --logging.resume_id=viteh --logging.folder output/nomixup_v3/ht/vit_advinput1.000_decoupled_cache_s0.05_randaugr0.01  $SHARED_PARAM"
 
 
 cur_command=${command_list[SLURM_ARRAY_TASK_ID]}
