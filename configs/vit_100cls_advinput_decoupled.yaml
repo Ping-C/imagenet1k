@@ -1,6 +1,6 @@
 data:
   in_memory: 1
-  num_workers: 12
+  num_workers: 6
   num_classes: 100
   train_dataset: /fsx/pingchiang/imagenet_ffcv_100class/train_400_0.1_90.ffcv
   val_dataset: /fsx/pingchiang/imagenet_ffcv_100class/val_400_0.1_90.ffcv

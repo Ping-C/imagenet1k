@@ -36,6 +36,11 @@ import wandb
 from torchvision.models import ResNet
 from torchvision.utils import make_grid
 from augmentations import Warp
+
+import torchvision
+import torchvision.transforms as transforms
+import torchvision.datasets as datasets
+
 class DictChecker(Checker):
     def check(self, value):
         return json.loads(value)
@@ -70,7 +75,8 @@ Section('data', 'data related stuff').params(
     val_dataset=Param(str, '.dat file to use for validation', required=True),
     num_classes=Param(int, 'number of classes in dataset', required=True),
     num_workers=Param(int, 'The number of workers', required=True),
-    in_memory=Param(int, 'does the dataset fit in memory? (1/0)', required=True)
+    in_memory=Param(int, 'does the dataset fit in memory? (1/0)', required=True),
+    torch_loader=Param(int, 'whether to use torch loader', default=0)
 )
 
 Section('lr', 'lr scheduling').params(
@@ -204,6 +210,25 @@ def get_step_lr(epoch, lr, step_ratio, step_length, epochs):
 
     num_steps = epoch // step_length
     return step_ratio**num_steps * lr
+
+def mixup_data(x, y, alpha=1.0, use_cuda=True):
+    '''Returns mixed inputs, pairs of targets, and lambda'''
+    if alpha > 0:
+        lam = np.random.beta(alpha, alpha)
+    else:
+        lam = 1
+
+    batch_size = x.size()[0]
+    if use_cuda:
+        index = ch.randperm(batch_size).cuda()
+    else:
+        index = ch.randperm(batch_size)
+
+    mixed_x = lam * x + (1 - lam) * x[index, :]
+    y_a, y_b = y, y[index]
+    lam = ch.ones_like(y_a) * lam
+    target = ch.cat((y_a[:, None], y_b[:, None], lam[:, None]), dim=1)
+    return mixed_x, target
 
 @param('radius.schedule_type')
 def get_radius_multiplier(epoch, schedule_type=None):
@@ -551,6 +576,14 @@ class ImageNetTrainer:
             self.train_adv_loss_func = self.train_loss_func
         else:
             self.train_adv_loss_func = ch.nn.CrossEntropyLoss(label_smoothing=adv_loss_smooth)
+
+    @param('data.torch_loader')
+    def create_train_loader(self, torch_loader=0):
+        if torch_loader:
+            return self.create_train_loader_torch()
+        else:
+            return self.create_train_loader_ffcv()
+
     @param('data.train_dataset')
     @param('data.num_workers')
     @param('training.batch_size')
@@ -562,7 +595,7 @@ class ImageNetTrainer:
     @param('training.randaug_magnitude')
     @param('training.mixed_precision')
     @param('training.altnorm')
-    def create_train_loader(self, train_dataset, num_workers, batch_size,
+    def create_train_loader_ffcv(self, train_dataset, num_workers, batch_size,
                             distributed, in_memory, mixup, randaug=False, randaug_num_ops=None, randaug_magnitude=None, mixed_precision=True,
                             altnorm=False):
         this_device = f'cuda:{self.gpu}'
@@ -610,6 +643,53 @@ class ImageNetTrainer:
 
         return loader
 
+
+    @param('data.train_dataset')
+    @param('data.num_workers')
+    @param('training.batch_size')
+    @param('training.distributed')
+    @param('data.in_memory')
+    @param('training.mixup')
+    @param('training.randaug')
+    @param('training.randaug_num_ops')
+    @param('training.randaug_magnitude')
+    @param('training.mixed_precision')
+    @param('training.altnorm')
+    def create_train_loader_torch(self, train_dataset, num_workers, batch_size,
+                            distributed, in_memory, mixup, randaug=False, randaug_num_ops=None, randaug_magnitude=None, mixed_precision=True,
+                            altnorm=False):
+
+
+        normalize = transforms.Normalize(mean=IMAGENET_MEAN,
+                                     std=IMAGENET_STD)
+
+        train_path = Path(train_dataset)
+        transforms_list = [
+                transforms.RandomResizedCrop(224),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                normalize,
+            ]
+        if randaug:
+            transforms_list.insert(2, transforms.RandAugment(num_ops=randaug_num_ops, magnitude=randaug_magnitude))
+        train_dataset = datasets.ImageFolder(
+            train_dataset,
+            transforms.Compose(transforms_list))
+        train_sampler = ch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=8, rank=self.gpu)
+        train_loader = ch.utils.data.DataLoader(
+            train_dataset, batch_size=batch_size, shuffle=(train_sampler is None),
+            num_workers=num_workers, pin_memory=True, sampler=train_sampler)
+        # still missing mixup
+        return train_loader
+
+
+    @param('data.torch_loader')
+    def create_val_loader(self, torch_loader=0):
+        if torch_loader:
+            return self.create_val_loader_torch()
+        else:
+            return self.create_val_loader_ffcv()
+
     @param('data.val_dataset')
     @param('data.num_workers')
     @param('validation.batch_size')
@@ -617,7 +697,7 @@ class ImageNetTrainer:
     @param('training.distributed')
     @param('training.mixed_precision')
     @param('training.altnorm')
-    def create_val_loader(self, val_dataset, num_workers, batch_size,
+    def create_val_loader_ffcv(self, val_dataset, num_workers, batch_size,
                           resolution, distributed, mixed_precision=1, altnorm=False):
         this_device = f'cuda:{self.gpu}'
         val_path = Path(val_dataset)
@@ -654,6 +734,36 @@ class ImageNetTrainer:
                         distributed=distributed)
         return loader
 
+    @param('data.val_dataset')
+    @param('data.num_workers')
+    @param('validation.batch_size')
+    @param('validation.resolution')
+    @param('training.distributed')
+    @param('training.mixed_precision')
+    @param('training.altnorm')
+    def create_val_loader_torch(self, val_dataset, num_workers, batch_size,
+                          resolution, distributed, mixed_precision=1, altnorm=False):
+
+        normalize = transforms.Normalize(mean=IMAGENET_MEAN,
+                                std=IMAGENET_STD)
+
+        val_path = Path(val_dataset)
+        transforms_list = [
+                transforms.Resize(256),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                normalize,
+            ]
+        val_dataset = datasets.ImageFolder(
+            val_path,
+            transforms.Compose(transforms_list))
+        val_sampler = ch.utils.data.distributed.DistributedSampler(val_dataset, shuffle=False, drop_last=True)
+        val_loader = ch.utils.data.DataLoader(
+            val_dataset, batch_size=batch_size, shuffle=(val_sampler is None),
+            num_workers=num_workers, pin_memory=True, sampler=val_sampler)
+        
+        return val_loader
+
     @param('training.epochs')
     @param('logging.log_level')
     @param('logging.save_checkpoint_interval')
@@ -661,8 +771,11 @@ class ImageNetTrainer:
     def train(self, epochs, log_level, save_checkpoint_interval, freeze_nonlayernorm_epochs=None, reset_layernorm=False):
         for epoch in range(self.starting_epoch, epochs):
             self.cur_epoch = epoch
-            res = self.get_resolution(epoch)
-            self.decoder.output_size = (res, res)
+            try:
+                res = self.get_resolution(epoch)
+                self.decoder.output_size = (res, res)
+            except:
+                pass
             if freeze_nonlayernorm_epochs is not None:
                 if epoch < freeze_nonlayernorm_epochs:
                     train_loss, train_loss_adv = self.train_loop(epoch, freeze_nonlayernorm=True)
@@ -979,8 +1092,10 @@ class ImageNetTrainer:
     @param('training.fixed_dropout')
     @param('training.mixed_precision')
     @param('adv.split_backward')
+    @param('data.torch_loader')
+    @param('training.mixup')
     def train_loop(self, epoch, log_level, grad_clip_norm=None, num_steps=0, adv_loss_weight=0, radius=0, fixed_dropout=False, freeze_layers=None, split_backward=False, 
-    freeze_nonlayernorm=False, adv_loss_even=False, mixed_precision=True): 
+    freeze_nonlayernorm=False, adv_loss_even=False, mixed_precision=True, torch_loader=0, mixup=0): 
         model = self.model
         model.train()
         losses = []
@@ -994,6 +1109,13 @@ class ImageNetTrainer:
 
         iterator = tqdm(self.train_loader)
         for ix, (images, target) in enumerate(iterator):
+            if torch_loader:
+                images, target = images.cuda(non_blocking=True), target.cuda(non_blocking=True)
+                if mixup:
+                    if ix == 0:
+                        print("doing mixup thing")
+                    images, target = mixup_data(images, target, 0.2, True)
+                    
             ### Training start
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = lrs[ix]
@@ -1128,7 +1250,8 @@ class ImageNetTrainer:
     @param('validation.lr_tta')
     @param('eval.layernorm_switch')
     @param('training.mixed_precision')
-    def val_loop(self, lr_tta, layernorm_switch, mixed_precision=True):
+    @param('data.torch_loader')
+    def val_loop(self, lr_tta, layernorm_switch, mixed_precision=True, torch_loader=0):
         model = self.model
         model.eval()
         stats = {}
@@ -1211,6 +1334,8 @@ class ImageNetTrainer:
         with ch.no_grad():
             with autocast(enabled=bool(mixed_precision)):
                 for images, target in tqdm(self.val_loader):
+                    if torch_loader:
+                        images, target = images.cuda(), target.cuda()
                     output = self.model(images)
                     if lr_tta:
                         output += self.model(ch.flip(images, dims=[3]))
