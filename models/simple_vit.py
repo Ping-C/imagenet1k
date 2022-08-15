@@ -3,7 +3,8 @@ from torch import nn
 
 from einops import rearrange
 from einops.layers.torch import Rearrange
-
+from torch.nn.init import xavier_uniform_
+import torch.nn as nn
 # helpers
 
 def pair(t):
@@ -35,7 +36,15 @@ class FeedForward(nn.Module):
         )
     def forward(self, x):
         return self.net(x)
-
+    def _reset_parameters(self):
+        self.apply(self._init_weights)
+    def _init_weights(self, module):
+        print(f"applying xavier uniform for {self} + normal init")
+        if isinstance(module, nn.Linear):
+            xavier_uniform_(module.weight.data)
+            if module.bias is not None:
+                module.bias.data.normal_(mean=0.0, std=1e-6)
+    
 class Attention(nn.Module):
     def __init__(self, dim, heads = 8, dim_head = 64):
         super().__init__()
@@ -63,75 +72,16 @@ class Attention(nn.Module):
         out = rearrange(out, 'b h n d -> b n (h d)')
         return self.to_out(out)
 
+    def _reset_parameters(self):
+        print(f"applying xavier uniform for {self} + zero init")
+        self.apply(self._init_weights)
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            xavier_uniform_(module.weight.data)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias.data)
+
 class Transformer(nn.Module):
-    def __init__(self, dim, depth, heads, dim_head, mlp_dim):
-        super().__init__()
-        self.layers = nn.ModuleList([])
-        for _ in range(depth):
-            self.layers.append(nn.ModuleList([
-                Attention(dim, heads = heads, dim_head = dim_head),
-                FeedForward(dim, mlp_dim)
-            ]))
-    def forward(self, x, feature_noise = {}, get_features=False, freeze_layers=None):
-        if get_features:
-            features = {}
-        for li, (attn, ff) in enumerate(self.layers):
-            x = attn(x) + x
-            x = ff(x) + x
-            if li in feature_noise:
-                if feature_noise[li] is None:
-                    feature_noise[li] = torch.zeros_like(x, requires_grad=True)
-                x += feature_noise[li]
-            if freeze_layers is not None and li == freeze_layers - 1:
-                x = x.detach()
-            if get_features:
-                features[li] = x
-        if get_features:
-            return x, features
-        else:
-            return x
-
-class TransformerTwoHead(nn.Module):
-    def __init__(self, dim, depth, heads, dim_head, mlp_dim, split_layer=None):
-        super().__init__()
-        self.layers = nn.ModuleList([])
-        for _ in range(depth):
-            self.layers.append(nn.ModuleList([
-                Attention(dim, heads = heads, dim_head = dim_head),
-                FeedForward(dim, mlp_dim)
-            ]))
-        self.aux_layers = nn.ModuleList([])
-        self.split_layer = split_layer
-        for _ in range(split_layer, depth):
-            self.aux_layers.append(nn.ModuleList([
-                Attention(dim, heads = heads, dim_head = dim_head),
-                FeedForward(dim, mlp_dim)
-            ]))
-
-    def forward(self, x, feature_noise = {}, get_features=False, aux_branch=False, freeze_layers=None):
-        if get_features:
-            features = {}
-        if aux_branch:
-            layers = self.layers[:self.split_layer] + self.aux_layers
-        else:
-            layers = self.layers
-        for li, (attn, ff) in enumerate(layers):
-            x = attn(x) + x
-            x = ff(x) + x
-            if li in feature_noise:
-                if feature_noise[li] is None:
-                    feature_noise[li] = torch.zeros_like(x, requires_grad=True)
-                x += feature_noise[li] 
-            if freeze_layers is not None and li == freeze_layers-1:
-                x = x.detach()
-            if get_features:
-                features[li] = x
-        if get_features:
-            return x, features
-        else:
-            return x
-
-class TransformerDecoupledLN(nn.Module):
     def __init__(self, dim, depth, heads, dim_head, mlp_dim):
         super().__init__()
         self.layers = nn.ModuleList([])
@@ -283,4 +233,3 @@ class SimpleViTTwoHead(nn.Module):
         for layer in self.transformer.layers[:layers_n]:
             for para in layer.parameters():
                 para.requires_grad = True
-                

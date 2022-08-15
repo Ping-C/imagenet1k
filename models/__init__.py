@@ -1,5 +1,5 @@
 
-from models.mvit_decoupled import MViTDecoupled
+from .mvit_decoupled import MViTDecoupled
 from .simple_vit import SimpleViT, SimpleViTTwoHead
 from .simple_vit_decoupled import SimpleViTDecoupledLN
 from .simple_vit_triple import SimpleViTTripleLN
@@ -10,6 +10,7 @@ import torch as ch
 import torch.nn as nn
 from timm.models.vision_transformer import VisionTransformer
 from .simple_vit_decoupled import LayerNormDecoupled
+from .simple_vit_v2 import SimpleViT_v2
 class BatchNormDecoupled(nn.Module):
     def __init__(self, bn):
         super().__init__()
@@ -56,6 +57,40 @@ def get_arch(arch_name, num_classes, probe=False, split_layer=None):
             mlp_dim = 768,
             probe=probe
         )
+    elif arch_name == 'vit_s_v2':
+        return SimpleViT_v2(
+            image_size = 224,
+            patch_size = 16,
+            num_classes = num_classes,
+            dim = 384,
+            depth = 12,
+            heads = 6,
+            mlp_dim = 768
+        )
+    elif arch_name == 'vit_s_v3':
+        model = SimpleViT_v2(
+            image_size = 224,
+            patch_size = 16,
+            num_classes = num_classes,
+            dim = 384,
+            depth = 12,
+            heads = 6,
+            mlp_dim = 768
+        )
+        model.transformer.apply(model._init_weights)
+        return model
+    elif arch_name == 'vit_s_v4':
+        model = SimpleViT_v2(
+            image_size = 224,
+            patch_size = 16,
+            num_classes = num_classes,
+            dim = 384,
+            depth = 12,
+            heads = 6,
+            mlp_dim = 768
+        )
+        model._reset_parameters()
+        return model
     elif arch_name == 'vit_s_twohead':
         return SimpleViTTwoHead(
             image_size = 224,
@@ -265,3 +300,6 @@ def get_arch(arch_name, num_classes, probe=False, split_layer=None):
         return MViTDecoupled(cfg,
             probe=probe)
     
+if __name__ == "__main__":
+    model = get_arch('vit_s', num_classes=1000)
+    import pdb;pdb.set_trace()

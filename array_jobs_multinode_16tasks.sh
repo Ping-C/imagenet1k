@@ -5,16 +5,16 @@
 
 # Lines that begin with #SBATCH specify commands to be used by SLURM for scheduling
 #SBATCH --job-name=img1k                                # sets the job name if not set from environment
-#SBATCH --array=38                       # Submit 8 array jobs, throttling to 4 at a time
-#SBATCH --output logs/imgnt1k_%A_%a.log                            # indicates a file to redirect STDOUT to; %j is the jobid, _%A_%a is array task id
-#SBATCH --error logs/imgnt1k_%A_%a.log                             # indicates a file to redirect STDERR to; %j is the jobid,_%A_%a is array task id
+#SBATCH --array=48                       # Submit 8 array jobs, throttling to 4 at a time
+#SBATCH --output logs/simplevits_re_%A_%a.log                            # indicates a file to redirect STDOUT to; %j is the jobid, _%A_%a is array task id
+#SBATCH --error logs/simplevits_re_%A_%a.log                             # indicates a file to redirect STDERR to; %j is the jobid,_%A_%a is array task id
 #SBATCH --account=all
 #SBATCH --ntasks=16
 #SBATCH --gpus-per-task=1
 #SBATCH --cpus-per-task=8
 #SBATCH --partition=lowpri
 #SBATCH --nice=0                                              #positive means lower priority
-#SBATCH --exclude=a100-st-p4d24xlarge-63
+#SBATCH --exclude=a100-st-p4d24xlarge-175,a100-st-p4d24xlarge-120,a100-st-p4d24xlarge-65
 
 
 
@@ -118,7 +118,27 @@ SHARED_PARAM="--dist.world_size=$SLURM_NTASKS --dist.multinode=1 --dist.port=$MA
 PYRAMID_PARAM="--training.mixup=1 --training.randaug=1 --training.randaug_num_ops=2 --training.randaug_magnitude=10 --training.mixed_precision=0 --training.batch_size=64 --data.num_workers=8 --lr.warmup_epochs=32 --model.arch=vit_b"
 command_list[38]="python train_imagenet.py --config-file configs/pyramid/vitb_1000cls.yaml $PYRAMID_PARAM                                                                                                                                         --logging.project_name imgnt1K --logging.resume_id=vits1000epoch300bwv3 --logging.folder output/pyramid/simplevitb_baseline_v5_warmup32 $SHARED_PARAM"
 
+# testing simple vit with randaug + mixup without label smoothing with adam
+export WDS_EPOCH=1
+SIMPLE_PARAM="--training.mixup=1 --training.randaug=1 --training.randaug_num_ops=2 --training.randaug_magnitude=10 --training.mixed_precision=0 --training.batch_size=64 --data.num_workers=8 --lr.warmup_epochs=32"
+command_list[39]="python train_imagenet.py --config-file configs/simplevit/vits_1000cls.yaml $SIMPLE_PARAM                                                                                                                                         --logging.project_name imgnt1K --logging.resume_id=simplevits1000epoch90ab --logging.folder outputs/simple_vits_tune/simplevits_v1 $SHARED_PARAM"
+command_list[40]="python train_imagenet.py --config-file configs/simplevit/vits_1000cls.yaml $SIMPLE_PARAM --training.optimizer=adamw                                                                                                              --logging.project_name imgnt1K --logging.resume_id=simplevits1000epoch90ac --logging.folder outputs/simple_vits_tune/simplevits_v2 $SHARED_PARAM"
+command_list[41]="python train_imagenet.py --config-file configs/simplevit/vits_1000cls.yaml $SIMPLE_PARAM --training.optimizer=adamw --data.torch_loader=1                                                                                        --logging.project_name imgnt1K --logging.resume_id=simplevits1000epoch90ad --logging.folder outputs/simple_vits_tune/simplevits_v3 $SHARED_PARAM"
+
+SIMPLE_PARAM="--training.mixup=1 --training.randaug=1 --training.randaug_num_ops=2 --training.randaug_magnitude=10 --training.mixed_precision=0 --training.batch_size=64 --data.num_workers=8 --lr.warmup_epochs=33 --training.epochs=90"
+command_list[42]="python train_imagenet.py --config-file configs/simplevit/vits_1000cls.yaml $SIMPLE_PARAM                                                                                                               --logging.project_name imgnt1K --logging.resume_id=simplevits1000epoch90ae --logging.folder outputs/simple_vits_tune/simplevits_v4_warmup33 $SHARED_PARAM"
+command_list[43]="python train_imagenet.py --config-file configs/simplevit/vits_1000cls.yaml $SIMPLE_PARAM --data.torch_loader=1                                                                                         --logging.project_name imgnt1K --logging.resume_id=simplevits1000epoch90af --logging.folder outputs/simple_vits_tune/simplevits_v5_warmup33_loader $SHARED_PARAM"
+
+command_list[44]="python train_imagenet.py --config-file configs/simplevit/vits_1000cls.yaml $SIMPLE_PARAM                                                                                                               --logging.project_name imgnt1K --logging.resume_id=simplevits1000epoch90ag --logging.folder outputs/simple_vits_tune/simplevits_v6_warmup8 $SHARED_PARAM"
+command_list[45]="python train_imagenet.py --config-file configs/simplevit/vits_1000cls.yaml $SIMPLE_PARAM --data.torch_loader=1                                                                                         --logging.project_name imgnt1K --logging.resume_id=simplevits1000epoch90ah --logging.folder outputs/simple_vits_tune/simplevits_v7_warmup8_loader $SHARED_PARAM"
+
+command_list[46]="python train_imagenet.py --config-file configs/simplevit/vits_1000cls.yaml $SIMPLE_PARAM --model.arch=vit_s_v2                                                                                         --logging.project_name imgnt1K --logging.resume_id=simplevits1000epoch90aj --logging.folder outputs/simple_vits_tune/simplevitsv2_v8_warmup8 $SHARED_PARAM"
+command_list[47]="python train_imagenet.py --config-file configs/simplevit/vits_1000cls.yaml $SIMPLE_PARAM --model.arch=vit_s_v3                                                                                         --logging.project_name imgnt1K --logging.resume_id=simplevits1000epoch90ak --logging.folder outputs/simple_vits_tune/simplevitsv3_v9_warmup8 $SHARED_PARAM"
+command_list[48]="python train_imagenet.py --config-file configs/simplevit/vits_1000cls.yaml $SIMPLE_PARAM --model.arch=vit_s_v4                                                                                         --logging.project_name imgnt1K --logging.resume_id=simplevits1000epoch90al --logging.folder outputs/simple_vits_tune/simplevitsv4_v10_warmup8 $SHARED_PARAM"
+
+
 # jobs for adversarial finetuning
 cur_command=${command_list[SLURM_ARRAY_TASK_ID]}
 echo $cur_command
 eval "srun -n $SLURM_NTASKS $cur_command"
+

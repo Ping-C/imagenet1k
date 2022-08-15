@@ -5,7 +5,7 @@
 
 # Lines that begin with #SBATCH specify commands to be used by SLURM for scheduling
 #SBATCH --job-name=vits                               # sets the job name if not set from environment
-#SBATCH --array=237-244                   # Submit 8 array jobs, throttling to 4 at a time
+#SBATCH --array=248                   # Submit 8 array jobs, throttling to 4 at a time
 #SBATCH --output logs/vits_100_%A_%a.log                            # indicates a file to redirect STDOUT to; %j is the jobid, _%A_%a is array task id
 #SBATCH --error logs/vits_100_%A_%a.log                             # indicates a file to redirect STDERR to; %j is the jobid,_%A_%a is array task id
 #SBATCH --account=all
@@ -14,7 +14,7 @@
 #SBATCH --gpus-per-task=1
 #SBATCH --partition=lowpri
 #SBATCH --nice=0                                              #positive means lower priority
-#SBATCH --exclude=
+#SBATCH --exclude=a100-st-p4d24xlarge-54
 ## SBATCH --dependency=afterany:41100_182                                             #positive means lower priority
 
 
@@ -363,6 +363,11 @@ command_list[242]="python train_imagenet.py --config-file configs/vit_100cls_adv
 command_list[243]="python train_imagenet.py --config-file configs/vit_100cls_advinput_decoupled.yaml --adv.radius_input=1.000 --adv.step_size_input=0.050 --adv.adv_cache=1 --training.mixup=0 --training.mixed_precision=0 --adv_augment.adv_augment_on=1 --adv_augment.radius=0.010 --adv_augment.step_size=0.0010 --adv_augment.random=0 --logging.project_name vit100 --logging.resume_id=viteg --logging.folder output/nomixup_v3/ht/vit_advinput1.000_decoupled_cache_s0.05_advaugr0.01  $SHARED_PARAM"
 command_list[244]="python train_imagenet.py --config-file configs/vit_100cls_advinput_decoupled.yaml --adv.radius_input=1.000 --adv.step_size_input=0.050 --adv.adv_cache=1 --training.mixup=0 --training.mixed_precision=0 --adv_augment.adv_augment_on=1 --adv_augment.radius=0.010 --adv_augment.step_size=0.0010 --adv_augment.random=1 --logging.project_name vit100 --logging.resume_id=viteh --logging.folder output/nomixup_v3/ht/vit_advinput1.000_decoupled_cache_s0.05_randaugr0.01  $SHARED_PARAM"
 
+command_list[245]="python train_imagenet.py --config-file configs/vit_100cls_advinput_decoupled.yaml --adv.radius_input=1.000 --adv.step_size_input=0.050 --adv.adv_cache=1 --training.mixup=0 --training.mixed_precision=0 --adv_augment.adv_augment_on=1 --adv_augment.radius=0.010 --adv_augment.step_size=0.0010 --adv_augment.random=0 --logging.project_name vit100 --logging.resume_id=vitei --logging.folder output/nomixup_v3/ht/vit_advinput1.000_decoupled_cache_s0.05_advaugr0.01_rorder  $SHARED_PARAM"
+command_list[246]="python train_imagenet.py --config-file configs/vit_100cls_advinput_decoupled.yaml --adv.radius_input=1.000 --adv.step_size_input=0.050 --adv.adv_cache=1 --training.mixup=0 --training.mixed_precision=0 --adv_augment.adv_augment_on=1 --adv_augment.radius=0.010 --adv_augment.step_size=0.0010 --adv_augment.random=1 --logging.project_name vit100 --logging.resume_id=vitej --logging.folder output/nomixup_v3/ht/vit_advinput1.000_decoupled_cache_s0.05_randaugr0.01_rorder  $SHARED_PARAM"
+command_list[247]="python train_imagenet.py --config-file configs/vit_100cls_advinput_decoupled.yaml --adv.radius_input=1.000 --adv.step_size_input=0.050 --adv.adv_cache=1 --training.mixup=0 --training.mixed_precision=0 --adv_augment.adv_augment_on=1 --adv_augment.radius=0.010 --adv_augment.step_size=0.0050 --adv_augment.random=0 --logging.project_name vit100 --logging.resume_id=vitek --logging.folder output/nomixup_v3/ht/vit_advinput1.000_decoupled_cache_s0.05_advaugr0.01s0.005_rorder  $SHARED_PARAM"
+
+command_list[248]="python train_imagenet_dataloading_test.py $SHARED_PARAM"
 
 cur_command=${command_list[SLURM_ARRAY_TASK_ID]}
 echo $cur_command

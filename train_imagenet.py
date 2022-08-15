@@ -40,7 +40,7 @@ from augmentations import Warp
 import torchvision
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
-
+import webdataset as wds
 class DictChecker(Checker):
     def check(self, value):
         return json.loads(value)
@@ -532,12 +532,20 @@ class ImageNetTrainer:
 
             self.optimizer = ch.optim.SGD(param_groups, lr=1, momentum=momentum)
         elif optimizer == 'adam':
-             # Only do weight decay on non-batchnorm parameters
+             # Only do weight decay on non-layernorm parameters and non bias parameters
             all_params = list(self.model.named_parameters())
-            bn_params = [v for k, v in all_params if ('bn' in k)]
-            other_params = [v for k, v in all_params if not ('bn' in k)]
+            norm_params = []
+            bias_params = []
+            other_params = []
+            for k, v in all_params:
+                if 'norm' in k:
+                    norm_params.append(v)
+                elif 'bias' in k:
+                    bias_params.append(v)
+                else:
+                    other_params.append(v)
             param_groups = [{
-                'params': bn_params,
+                'params': norm_params + bias_params,
                 'weight_decay': 0.
             }, {
                 'params': other_params,
@@ -547,10 +555,21 @@ class ImageNetTrainer:
             self.optimizer = ch.optim.Adam(param_groups, lr=1)
         elif optimizer == 'adamw':
             all_params = list(self.model.named_parameters())
-            bn_params = [v for k, v in all_params if ('bn' in k)]
-            other_params = [v for k, v in all_params if not ('bn' in k)]
+            norm_params = []
+            bias_params = []
+            other_params = []
+            for k, v in all_params:
+                if 'norm' in k:
+                    norm_params.append(v)
+                    print(f'Parameter {k} is norm')
+                elif 'bias' in k:
+                    print(f'Parameter {k} is bias')
+                    bias_params.append(v)
+                else:
+                    print(f'Parameter {k} uses weight decay')
+                    other_params.append(v)
             param_groups = [{
-                'params': bn_params,
+                'params': norm_params + bias_params,
                 'weight_decay': 0.
             }, {
                 'params': other_params,
@@ -642,7 +661,7 @@ class ImageNetTrainer:
                         distributed=distributed)
 
         return loader
-
+    
 
     @param('data.train_dataset')
     @param('data.num_workers')
@@ -658,12 +677,10 @@ class ImageNetTrainer:
     def create_train_loader_torch(self, train_dataset, num_workers, batch_size,
                             distributed, in_memory, mixup, randaug=False, randaug_num_ops=None, randaug_magnitude=None, mixed_precision=True,
                             altnorm=False):
+        data_path = "/datasets01/imagenet/imagenet_shared_4000/train/shard_{00000000..00000320}.tar" 
+        normalize = transforms.Normalize(mean=IMAGENET_MEAN/255,
+                                     std=IMAGENET_STD/255)
 
-
-        normalize = transforms.Normalize(mean=IMAGENET_MEAN,
-                                     std=IMAGENET_STD)
-
-        train_path = Path(train_dataset)
         transforms_list = [
                 transforms.RandomResizedCrop(224),
                 transforms.RandomHorizontalFlip(),
@@ -672,15 +689,27 @@ class ImageNetTrainer:
             ]
         if randaug:
             transforms_list.insert(2, transforms.RandAugment(num_ops=randaug_num_ops, magnitude=randaug_magnitude))
-        train_dataset = datasets.ImageFolder(
-            train_dataset,
-            transforms.Compose(transforms_list))
-        train_sampler = ch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=8, rank=self.gpu)
-        train_loader = ch.utils.data.DataLoader(
-            train_dataset, batch_size=batch_size, shuffle=(train_sampler is None),
-            num_workers=num_workers, pin_memory=True, sampler=train_sampler)
-        # still missing mixup
-        return train_loader
+        
+        shardlist = wds.PytorchShardList(data_path, epoch_shuffle=True)
+        dataset = (
+                    wds.WebDataset(shardlist)
+                    .shuffle(True)
+                    .decode("pil")
+                    .to_tuple("ppm;jpg;jpeg;png", "cls")
+                    .map_tuple(transforms.Compose(transforms_list), wds.iterators.identity)
+                    .batched(batch_size, partial=False)
+        )
+        loader = wds.WebLoader(
+                    dataset,
+                    batch_size=None,
+                    shuffle=False,  # handled by dataset
+                    num_workers=num_workers,
+                    pin_memory=True,
+                ).ddp_equalize( 1_281_167 // batch_size)
+        loader.__len__ = lambda : 1_281_167 // batch_size // ch.distributed.get_world_size()
+
+        return loader
+
 
 
     @param('data.torch_loader')
@@ -743,9 +772,9 @@ class ImageNetTrainer:
     @param('training.altnorm')
     def create_val_loader_torch(self, val_dataset, num_workers, batch_size,
                           resolution, distributed, mixed_precision=1, altnorm=False):
-
-        normalize = transforms.Normalize(mean=IMAGENET_MEAN,
-                                std=IMAGENET_STD)
+        val_dataset = '/datasets01/imagenet_full_size/061417/val'
+        normalize = transforms.Normalize(mean=IMAGENET_MEAN/255,
+                                std=IMAGENET_STD/255)
 
         val_path = Path(val_dataset)
         transforms_list = [
@@ -1104,16 +1133,14 @@ class ImageNetTrainer:
         sam = radius > 0
 
         lr_start, lr_end = self.get_lr(epoch), self.get_lr(epoch + 1)
-        iters = len(self.train_loader)
+        iters = self.train_loader.__len__()
         lrs = np.interp(np.arange(iters), [0, iters], [lr_start, lr_end])
 
-        iterator = tqdm(self.train_loader)
+        iterator = tqdm(self.train_loader, total=iters)
         for ix, (images, target) in enumerate(iterator):
             if torch_loader:
                 images, target = images.cuda(non_blocking=True), target.cuda(non_blocking=True)
                 if mixup:
-                    if ix == 0:
-                        print("doing mixup thing")
                     images, target = mixup_data(images, target, 0.2, True)
                     
             ### Training start
@@ -1167,18 +1194,18 @@ class ImageNetTrainer:
                     # generate adversarial data augmentation if it is a thing
                     if hasattr(self, 'adv_augment'):
                         self.adv_augment.update() # update adversarial data augmentation
-                        images_aug = self.adv_augment.augment(images)
+                        aug = self.adv_augment.augment
                     else:
-                        images_aug = images
+                        aug = lambda x: x
                     if isinstance(self.model.module, ResNet) or isinstance(self.model.module, VisionTransformer):
-                        output_adv = self.model(images_aug+images_adv)
+                        output_adv = self.model(aug(images+images_adv))
                     else:
-                        output_adv = self.model(images_aug+images_adv, feature_noise=features_adv, freeze_layers=freeze_layers)
+                        output_adv = self.model(aug(images+images_adv), feature_noise=features_adv, freeze_layers=freeze_layers)
                     if self.rank == 0:
                         # log some images to wandb
                         if ix == 0:
                             clean_img_arr = make_grid(images, normalize=True)
-                            adv_img_arr = make_grid(images_aug+images_adv, normalize=True)
+                            adv_img_arr = make_grid(aug(images+images_adv), normalize=True)
                             clean_img = wandb.Image(clean_img_arr, caption="clean images")
                             adv_img = wandb.Image(adv_img_arr, caption="adv images")
                             wandb.log(
