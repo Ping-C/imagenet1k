@@ -5,7 +5,7 @@
 
 # Lines that begin with #SBATCH specify commands to be used by SLURM for scheduling
 #SBATCH --job-name=img1k                                # sets the job name if not set from environment
-#SBATCH --array=48                       # Submit 8 array jobs, throttling to 4 at a time
+#SBATCH --array=50                       # Submit 8 array jobs, throttling to 4 at a time
 #SBATCH --output logs/simplevits_re_%A_%a.log                            # indicates a file to redirect STDOUT to; %j is the jobid, _%A_%a is array task id
 #SBATCH --error logs/simplevits_re_%A_%a.log                             # indicates a file to redirect STDERR to; %j is the jobid,_%A_%a is array task id
 #SBATCH --account=all
@@ -136,8 +136,15 @@ command_list[46]="python train_imagenet.py --config-file configs/simplevit/vits_
 command_list[47]="python train_imagenet.py --config-file configs/simplevit/vits_1000cls.yaml $SIMPLE_PARAM --model.arch=vit_s_v3                                                                                         --logging.project_name imgnt1K --logging.resume_id=simplevits1000epoch90ak --logging.folder outputs/simple_vits_tune/simplevitsv3_v9_warmup8 $SHARED_PARAM"
 command_list[48]="python train_imagenet.py --config-file configs/simplevit/vits_1000cls.yaml $SIMPLE_PARAM --model.arch=vit_s_v4                                                                                         --logging.project_name imgnt1K --logging.resume_id=simplevits1000epoch90al --logging.folder outputs/simple_vits_tune/simplevitsv4_v10_warmup8 $SHARED_PARAM"
 
+SIMPLE_PARAM="--training.mixup=1 --training.randaug=1 --training.randaug_num_ops=2 --training.randaug_magnitude=10 --training.mixed_precision=0 --training.batch_size=64 --data.num_workers=8 --lr.warmup_epochs=8 --training.epochs=90"
+command_list[49]="python train_imagenet.py --config-file configs/simplevit/vits_1000cls.yaml $SIMPLE_PARAM --model.arch=vit_s_v4 --training.altnorm=1                                                                    --logging.project_name imgnt1K --logging.resume_id=simplevits1000epoch90am --logging.folder outputs/simple_vits_tune/simplevitsv4_v11_warmup8_altnorm $SHARED_PARAM"
+command_list[50]="python train_imagenet.py --config-file configs/simplevit/vits_1000cls.yaml $SIMPLE_PARAM --model.arch=vit_s_v5 --training.altnorm=1                                                                    --logging.project_name imgnt1K --logging.resume_id=simplevits1000epoch90an --logging.folder outputs/simple_vits_tune/simplevitsv5_v12_warmup8_altnorm $SHARED_PARAM"
 
-# jobs for adversarial finetuning
+
+# python train_imagenet.py --config-file configs/simplevit/vits_1000cls.yaml --training.batch_size=128 --model.arch=vit_s_v5 --training.altnorm=1 --lr.warmup_epochs=8 --training.epochs=90 --logging.project_name imgnt1K --logging.resume_id=simplevits1000epoch90an --logging.folder outputs/simple_vits_tune/simplevitsv5_v12_warmup8_altnorm --dist.world_size=8 --dist.multinode=0
+# python train_imagenet.py --config-file configs/simplevit/vits_1000cls.yaml --training.batch_size=128 --model.arch=vit_s_v5 --training.altnorm=1 --lr.warmup_epochs=8 --training.epochs=90 --logging.project_name imgnt1K --training.weight_decay_explicit=1 --logging.resume_id=simplevits1000epoch90ao --logging.folder outputs/simple_vits_tune/simplevitsv5_v13_warmup8_altnorm_exwd --dist.world_size=8 --dist.multinode=0
+# python train_imagenet.py --config-file configs/simplevit/vits_1000cls.yaml --training.batch_size=128 --model.arch=vit_s_v5 --training.altnorm=1 --lr.warmup_epochs=8 --training.epochs=90 --logging.project_name imgnt1K --training.weight_decay_explicit=1 --training.weight_decay_nolr=1 --logging.resume_id=simplevits1000epoch90ap --logging.folder outputs/simple_vits_tune/simplevitsv5_v14_warmup8_altnorm_exwdnolr --dist.world_size=8 --dist.multinode=0
+
 cur_command=${command_list[SLURM_ARRAY_TASK_ID]}
 echo $cur_command
 eval "srun -n $SLURM_NTASKS $cur_command"

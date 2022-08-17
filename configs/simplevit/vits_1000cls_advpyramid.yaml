@@ -14,7 +14,7 @@ lr:
   lr_schedule_type: cyclic_warm
   warmup_epochs: 8
 model:
-  arch: vit_s_decoupled_v5
+  arch: vit_s_v5
 resolution:
   end_ramp: 13
   max_res: 224
@@ -43,7 +43,8 @@ validation:
   resolution: 224
 adv:
   num_steps: 1
-  radius_input: 0.005
-  step_size_input: 0.005
+  radius_input: 0.06
+  step_size_input: 0.06
   adv_loss_weight: 0.5
+  pyramid: 1
 

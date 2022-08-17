@@ -41,12 +41,20 @@ import torchvision
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import webdataset as wds
+
 class DictChecker(Checker):
     def check(self, value):
         return json.loads(value)
 
     def help(self):
         return "a dictionary"
+
+class ListChecker(Checker):
+    def check(self, value):
+        return [v for v in value.split(",")]
+
+    def help(self):
+        return "a list"
 
 
 from ffcv.pipeline.operation import Operation
@@ -111,6 +119,8 @@ Section('training', 'training hyper param stuff').params(
     optimizer=Param(And(str, OneOf(['sgd', 'adam', 'adamw'])), 'The optimizer', default='sgd'),
     momentum=Param(float, 'SGD momentum', default=0.9),
     weight_decay=Param(float, 'weight decay', default=4e-5),
+    weight_decay_explicit=Param(int, 'whether to use decoupled weight decay', default=0),
+    weight_decay_nolr=Param(int, 'whether to use apply learning rate to weight decay', default=0),
     grad_clip_norm=Param(float, 'gradient clipping threshold', default=None),
     epochs=Param(int, 'number of epochs', default=30),
     label_smoothing=Param(float, 'label smoothing parameter', default=0.1),
@@ -143,9 +153,14 @@ Section('adv', 'hyper parameter related to adversarial training').params(
     cache_sequential=Param(float, 'whether to update the cache sequentially or randomly when cache_size_multiplier is larger than 1', default=0),
     cache_class_wise=Param(float, 'whether to use class wise universal perturbation', default=0),
     cache_class_wise_shuffle_iter=Param(int, 'number of iterations to shuffle class wise adversaries'),
-    pyramid=Param(float, 'whether to use class wise universal perturbation', default=0),
+    pyramid=Param(float, 'whether to use pyramid adversary', default=0),
     optimizer=Param(str, 'optimizer used to optimizer the image'),
     lr=Param(float, 'optimizer used to optimizer the image'),
+)
+
+Section('pyramid', 'hyperparameters associated with pyramid adversarial training').params(
+    scale_factors=Param(str, 'scales or pyramid', default='32,16,1'),
+    m_factors=Param(str, 'step multiplier', default='20,10,1'),
 )
 
 Section('adv_augment', 'hyper parameter related to adversarial augmentation training').params(
@@ -397,7 +412,8 @@ class ImageNetTrainer:
             if resume_checkpoint is None:
                 latest_epoch_ckpt_file = None
                 latest_epoch = -float('inf')
-                ch.distributed.barrier()
+                if distributed:
+                    ch.distributed.barrier()
                 for file in os.listdir(self.log_folder):
                     if 'epoch' in file:
                         epoch = int(file.replace('epoch', '').replace('.pt', ''))
@@ -476,7 +492,10 @@ class ImageNetTrainer:
         ch.cuda.set_device(self.gpu)
 
     def cleanup_distributed(self):
+        dist.barrier()
         dist.destroy_process_group()
+        # put here to explicitly terminate the process
+        raise ValueError("a hack to terminate the process")
 
     @param('lr.lr_schedule_type')
     def get_lr(self, epoch, lr_schedule_type):
@@ -514,8 +533,9 @@ class ImageNetTrainer:
     @param('training.label_smoothing')
     @param('training.mixup')
     @param('adv.adv_loss_smooth')
+    @param('training.weight_decay_explicit')
     def create_optimizer(self, momentum, optimizer, weight_decay,
-                         label_smoothing, mixup, adv_loss_smooth=None):
+                         label_smoothing, mixup, adv_loss_smooth=None, weight_decay_explicit=0):
         if optimizer == 'sgd':
 
             # Only do weight decay on non-batchnorm parameters
@@ -549,7 +569,7 @@ class ImageNetTrainer:
                 'weight_decay': 0.
             }, {
                 'params': other_params,
-                'weight_decay': weight_decay
+                'weight_decay': 0 if weight_decay_explicit else weight_decay
             }]
 
             self.optimizer = ch.optim.Adam(param_groups, lr=1)
@@ -573,7 +593,7 @@ class ImageNetTrainer:
                 'weight_decay': 0.
             }, {
                 'params': other_params,
-                'weight_decay': weight_decay
+                'weight_decay': 0 if weight_decay_explicit else weight_decay
             }]
             self.optimizer = ch.optim.AdamW(param_groups, lr=1)
         else:
@@ -1057,22 +1077,25 @@ class ImageNetTrainer:
     @param('adv.adv_cache')
     @param('adv.optimizer')
     @param('adv.lr')
+    @param('adv.pyramid')
     @param('training.mixed_precision')
     def adv_step(self, model, images, target,
-        num_steps=None, step_size_input=None, radius_input=None, adv_features=None, aux_branch=False, adv_cache=False, optimizer='pgd', lr=None, beta=0.9, mixed_precision=True):
+        num_steps=None, step_size_input=None, radius_input=None, adv_features=None, aux_branch=False, adv_cache=False, optimizer='pgd', lr=None, beta=0.9, mixed_precision=True, pyramid=False):
         if adv_cache:
             return self.adv_cache(images, target)
+        if pyramid:
+            return self.adv_step_pyramid(model, images, target)
         input_adv_noise = ch.zeros_like(images, requires_grad=True)
         feature_adv_noise = FeatureNoise({int(layer): None for layer in adv_features} if adv_features is not None else {})
         for step in range(num_steps):
             with autocast(enabled=bool(mixed_precision)):
-                if isinstance(self.model.module, ResNet) or isinstance(self.model.module, VisionTransformer):
-                    output = self.model(images+input_adv_noise) # resnet doesn't support feature noise
+                if isinstance(model.module, ResNet) or isinstance(model.module, VisionTransformer):
+                    output = model(images+input_adv_noise) # resnet doesn't support feature noise
                 else:
                     if aux_branch == False:
-                        output = self.model(images+input_adv_noise, feature_noise=feature_adv_noise)
+                        output = model(images+input_adv_noise, feature_noise=feature_adv_noise)
                     else:
-                        output = self.model(images+input_adv_noise, feature_noise=feature_adv_noise, aux_branch=aux_branch)
+                        output = model(images+input_adv_noise, feature_noise=feature_adv_noise, aux_branch=aux_branch)
                 
                 loss_adv = self.train_loss_func(output, target)
                 all_step_sizes = [step_size_input]
@@ -1104,12 +1127,58 @@ class ImageNetTrainer:
                         last_grad.data = (last_grad * beta + grad/self.scaler.get_scale() * (1-beta))
                         noise.data.clamp_(-radius, +radius)
 
-                    
-                        
         for k in feature_adv_noise:
             feature_adv_noise[k] = feature_adv_noise[k].detach()
         
         return input_adv_noise.detach(), feature_adv_noise
+
+    @param('adv.num_steps')
+    @param('adv.radius_input')
+    @param('adv.step_size_input')
+    @param('training.mixed_precision')
+    @param('pyramid.scale_factors')
+    @param('pyramid.m_factors')
+    @param('data.num_classes')
+    def adv_step_pyramid(self, model, images, target,
+        num_steps=None, step_size_input=None, radius_input=None, mixed_precision=True,
+        scale_factors=[32, 16, 1], m_factors=[20, 10, 1], num_classes=None):
+        if not isinstance(scale_factors, list):
+            scale_factors = [int(v) for v in scale_factors.split(',')]
+        if not isinstance(m_factors, list):
+            m_factors = [int(v) for v in m_factors.split(',')]
+        b_size = images.shape[0]
+        all_noises = []
+        for scale_factor in scale_factors:
+            noise = ch.zeros(
+                    (b_size, images.shape[1], *(ch.tensor(images.shape[2:])//scale_factor)), 
+                    device=images.device, 
+                    dtype=images.dtype)
+            noise.requires_grad_(True)
+            all_noises.append(
+                noise
+            )
+            
+        def compose_pyramid_noise(noise):
+            pyramid_noise = None
+            for noise, m_factor in zip(noise, m_factors):
+                if pyramid_noise is None:
+                    pyramid_noise = ch.nn.functional.upsample(noise, images.shape[2:])*m_factor
+                else:
+                    pyramid_noise += ch.nn.functional.upsample(noise, images.shape[2:])*m_factor
+            return pyramid_noise
+        rand_target = ch.randint_like(target, low=0, high=num_classes)
+        for step in range(num_steps):
+            with autocast(enabled=bool(mixed_precision)):
+                pyramid_noise = compose_pyramid_noise(all_noises)
+                output = model(images+pyramid_noise)
+                loss_adv = self.train_loss_func(output, rand_target)
+                all_grad = ch.autograd.grad(self.scaler.get_scale()*loss_adv, all_noises)
+                # apply perturbations to each individual features
+                for noise, grad in zip(all_noises, all_grad):
+                    noise.data -= grad.sign() * step_size_input
+                    noise.data.clamp_(-radius_input, +radius_input)
+
+        return compose_pyramid_noise(all_noises).detach(), FeatureNoise({})
 
     @param('logging.log_level')
     @param('training.grad_clip_norm')
@@ -1123,8 +1192,11 @@ class ImageNetTrainer:
     @param('adv.split_backward')
     @param('data.torch_loader')
     @param('training.mixup')
+    @param('training.weight_decay_explicit')
+    @param('training.weight_decay')
+    @param('training.weight_decay_nolr')
     def train_loop(self, epoch, log_level, grad_clip_norm=None, num_steps=0, adv_loss_weight=0, radius=0, fixed_dropout=False, freeze_layers=None, split_backward=False, 
-    freeze_nonlayernorm=False, adv_loss_even=False, mixed_precision=True, torch_loader=0, mixup=0): 
+    freeze_nonlayernorm=False, adv_loss_even=False, mixed_precision=True, torch_loader=0, mixup=0, weight_decay_explicit=0, weight_decay=0, weight_decay_nolr=0): 
         model = self.model
         model.train()
         losses = []
@@ -1227,7 +1299,6 @@ class ImageNetTrainer:
                             loss_train = loss_train_adv * adv_loss_weight + loss_train * (1-adv_loss_weight) + dummy_loss
                 else:
                     loss_train_adv= ch.tensor(0)
-  
             if not split_backward:
                 self.scaler.scale(loss_train).backward()
             # Unscales the gradients of optimizer's assigned params in-place
@@ -1247,6 +1318,15 @@ class ImageNetTrainer:
                 ch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
 
             self.scaler.step(self.optimizer)
+            # explicitly implement weight decay
+            if weight_decay_explicit:
+                params = self.optimizer.param_groups[1]['params']
+                cur_lr = self.optimizer.param_groups[1]['lr']
+                for para in params:
+                    if weight_decay_nolr:
+                        para.data -= para.data * weight_decay
+                    else:
+                        para.data -= para.data * cur_lr * weight_decay
             self.scaler.update()
             if sam:
                 for i, para in enumerate(self.model.parameters()):
@@ -1436,7 +1516,6 @@ class ImageNetTrainer:
     def _exec_wrapper(cls, *args, **kwargs):
         make_config(quiet=True)
         cls.exec(*args, **kwargs)
-
     @classmethod
     @param('training.distributed')
     @param('training.eval_only')

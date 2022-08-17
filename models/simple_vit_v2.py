@@ -8,7 +8,7 @@ from torch.nn.init import xavier_uniform_
 import torch.nn as nn
 
 class SimpleViT_v2(nn.Module):
-    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, heads, mlp_dim, channels = 3, dim_head = 64, probe=False):
+    def __init__(self, image_size, patch_size, num_classes, dim, depth, heads, mlp_dim, channels = 3, dim_head = 64, probe=False):
         super().__init__()
         image_height, image_width = pair(image_size)
         patch_height, patch_width = pair(patch_size)
@@ -55,6 +55,12 @@ class SimpleViT_v2(nn.Module):
         for module in self.modules():
             if isinstance(module, FeedForward) or isinstance(module, Attention):
                 module._reset_parameters()
+    def _reset_parameters_v2(self):
+        self._reset_parameters()
+        nn.init.zeros_(self.linear_head[0].weight.data)
+
+
+
 
 
 

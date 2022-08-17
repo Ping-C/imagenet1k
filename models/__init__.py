@@ -10,7 +10,9 @@ import torch as ch
 import torch.nn as nn
 from timm.models.vision_transformer import VisionTransformer
 from .simple_vit_decoupled import LayerNormDecoupled
+from .simple_vit_decoupled_v2 import SimpleViTDecoupledLayernorm_v2
 from .simple_vit_v2 import SimpleViT_v2
+from .simple_vit_v3 import SimpleViT_v3
 class BatchNormDecoupled(nn.Module):
     def __init__(self, bn):
         super().__init__()
@@ -91,6 +93,55 @@ def get_arch(arch_name, num_classes, probe=False, split_layer=None):
         )
         model._reset_parameters()
         return model
+    
+    elif arch_name == 'vit_s_v5':
+        model = SimpleViT_v2(
+            image_size = 224,
+            patch_size = 16,
+            num_classes = num_classes,
+            dim = 384,
+            depth = 12,
+            heads = 6,
+            mlp_dim = 384*4
+        )
+        model._reset_parameters()
+        return model
+    elif arch_name == 'vit_s_v6':
+        model = SimpleViT_v2(
+            image_size = 224,
+            patch_size = 16,
+            num_classes = num_classes,
+            dim = 384,
+            depth = 12,
+            heads = 6,
+            mlp_dim = 384*4
+        )
+        model._reset_parameters_v2()
+        return model
+    elif arch_name == 'vit_s_v7':
+        model = SimpleViT_v3(
+            image_size = 224,
+            patch_size = 16,
+            num_classes = num_classes,
+            dim = 384,
+            depth = 12,
+            heads = 6,
+            mlp_dim = 384*4
+        )
+        model._reset_parameters_v2()
+        return model
+    elif arch_name == 'vit_b_v5':
+        model = SimpleViT_v2(
+            image_size = 224,
+            patch_size = 16,
+            num_classes = num_classes,
+            dim = 768,
+            depth = 12,
+            heads = 12,
+            mlp_dim = 768*4
+        )
+        model._reset_parameters()
+        return model
     elif arch_name == 'vit_s_twohead':
         return SimpleViTTwoHead(
             image_size = 224,
@@ -114,6 +165,31 @@ def get_arch(arch_name, num_classes, probe=False, split_layer=None):
             mlp_dim = 768,
             probe=probe
         )
+    
+    elif arch_name == 'vit_s_decoupled_v5':
+        model = SimpleViTDecoupledLayernorm_v2(
+            image_size = 224,
+            patch_size = 16,
+            num_classes = num_classes,
+            dim = 384,
+            depth = 12,
+            heads = 6,
+            mlp_dim = 384*4
+        )
+        model._reset_parameters()
+        return model
+    elif arch_name == 'vit_b_decoupled_v5':
+        model = SimpleViTDecoupledLayernorm_v2(
+            image_size = 224,
+            patch_size = 16,
+            num_classes = num_classes,
+            dim = 768,
+            depth = 12,
+            heads = 12,
+            mlp_dim = 768*4
+        )
+        model._reset_parameters()
+        return model
     elif arch_name == 'vit_s_triple':
         return SimpleViTTripleLN(
             image_size = 224,
