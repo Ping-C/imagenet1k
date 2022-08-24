@@ -5,6 +5,8 @@ from einops import rearrange
 from einops.layers.torch import Rearrange
 from torch.nn.init import xavier_uniform_
 import torch.nn as nn
+
+from .simple_vit import Transformer
 # helpers
 
 def pair(t):

@@ -14,7 +14,7 @@ lr:
   lr_schedule_type: cyclic_warm
   warmup_epochs: 70
 model:
-  arch: mvit_s_decoupled
+  arch: mvit_s
 resolution:
   end_ramp: 13
   max_res: 224
@@ -34,9 +34,10 @@ training:
   mixup: 1
 adv:
   num_steps: 1
-  radius_input: 0.01
-  step_size_input: 0.01
+  radius_input: 0.06
+  step_size_input: 0.06
   adv_loss_weight: 0.5
+  pyramid: 1
   split_backward: 1
 validation:
   batch_size: 64

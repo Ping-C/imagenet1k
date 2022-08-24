@@ -5,6 +5,8 @@ from torch.cuda.amp import autocast
 import torch.nn.functional as F
 import torch.distributed as dist
 from torch.distributed import ReduceOp
+
+from randaugment_v2 import RandAugmentV2, RandAugmentV3
 ch.backends.cudnn.benchmark = True
 ch.autograd.profiler.emit_nvtx(False)
 ch.autograd.profiler.profile(False)
@@ -41,6 +43,14 @@ import torchvision
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import webdataset as wds
+import sys
+sys.path.insert(0, '/data/home/pingchiang/project/big_vision')
+import big_vision.input_pipeline as input_pipeline
+from big_vision.pp.ops_image import *
+from big_vision.pp.ops_general_torch import *
+import tensorflow as tf
+tf.config.set_visible_devices([], 'GPU')
+
 
 class DictChecker(Checker):
     def check(self, value):
@@ -84,7 +94,7 @@ Section('data', 'data related stuff').params(
     num_classes=Param(int, 'number of classes in dataset', required=True),
     num_workers=Param(int, 'The number of workers', required=True),
     in_memory=Param(int, 'does the dataset fit in memory? (1/0)', required=True),
-    torch_loader=Param(int, 'whether to use torch loader', default=0)
+    loader_type=Param(And(str, OneOf(['ffcv', 'tf', 'wb'])), 'choose between ffcv, tf, wb', default='ffcv')
 )
 
 Section('lr', 'lr scheduling').params(
@@ -121,6 +131,7 @@ Section('training', 'training hyper param stuff').params(
     weight_decay=Param(float, 'weight decay', default=4e-5),
     weight_decay_explicit=Param(int, 'whether to use decoupled weight decay', default=0),
     weight_decay_nolr=Param(int, 'whether to use apply learning rate to weight decay', default=0),
+    weight_decay_schedule=Param(int, 'using learning rate proportional schedule', default=0),
     grad_clip_norm=Param(float, 'gradient clipping threshold', default=None),
     epochs=Param(int, 'number of epochs', default=30),
     label_smoothing=Param(float, 'label smoothing parameter', default=0.1),
@@ -163,11 +174,6 @@ Section('pyramid', 'hyperparameters associated with pyramid adversarial training
     m_factors=Param(str, 'step multiplier', default='20,10,1'),
 )
 
-Section('universal_feature_adv', 'hyperparameters associated with universal feature adversary').params(
-    step_size=Param(float, 'step size', default=0.001),
-    radius=Param(float, 'radius', default=0.01),
-    layers=Param(str, 'radius', default='0,'),
-)
 Section('adv_augment', 'hyper parameter related to adversarial augmentation training').params(
     adv_augment_on=Param(int, 'turn on adversarial augment', default=0),
     radius=Param(float, 'adversarial radius'),
@@ -249,6 +255,46 @@ def mixup_data(x, y, alpha=1.0, use_cuda=True):
     lam = ch.ones_like(y_a) * lam
     target = ch.cat((y_a[:, None], y_b[:, None], lam[:, None]), dim=1)
     return mixed_x, target
+
+def mixup_data_v2(x, y, alpha=1.0, use_cuda=True):
+    '''Returns mixed inputs, pairs of targets, and lambda'''
+    if alpha > 0:
+        lam1 = np.random.beta(alpha, alpha)
+        lam2 = np.random.beta(alpha, alpha)
+    else:
+        lam = 1
+
+    batch_size = x.size()[0]
+    if use_cuda:
+        index = ch.randperm(batch_size).cuda()
+    else:
+        index = ch.randperm(batch_size)
+
+    mixed_x = lam1 * x + lam2 * x[index, :]
+    mixed_y = lam1 * ch.nn.functional.one_hot(y, 1000).float() + lam2 * ch.nn.functional.one_hot(y[index], 1000).float()
+
+    return mixed_x, mixed_y
+
+
+def mixup_data_tf(x, y, alpha=1.0, use_cuda=True):
+    '''Returns mixed inputs, pairs of targets, and lambda'''
+    if alpha > 0:
+        lam1 = np.random.beta(alpha, alpha)
+        lam2 = np.random.beta(alpha, alpha)
+    else:
+        lam = 1
+
+    batch_size = x.size()[0]
+    if use_cuda:
+        index = ch.randperm(batch_size).cuda()
+    else:
+        index = ch.randperm(batch_size)
+
+    mixed_x = lam1 * x + lam2 * x[index, :]
+    mixed_y = lam1 * y + lam2 * y[index, :]
+
+    return mixed_x, mixed_y
+
 
 @param('radius.schedule_type')
 def get_radius_multiplier(epoch, schedule_type=None):
@@ -362,7 +408,7 @@ def get_cyclic_lr(epoch, lr, epochs, lr_peak_epoch):
 def get_cyclic_lr_withwarmups(epoch, lr, warmup_epochs, epochs):
     xs = [0, warmup_epochs]
     xs.extend([epoch for epoch in range(warmup_epochs+1, epochs)])
-    ys = [1e-4 * lr, lr]
+    ys = [0, lr]
     for e in range(warmup_epochs+1, epochs):
         progress = (e-warmup_epochs)/(epochs-warmup_epochs)
         ys.append(lr * 0.5 * (1. + np.cos(np.pi * progress)))
@@ -395,6 +441,7 @@ class ImageNetTrainer:
         self.all_params = get_current_config()
         self.rank = rank
         self.gpu = self.rank % ch.cuda.device_count()
+        self.cur_epoch = 0
 
 
         print("rank:", self.rank, ",gpu:", self.gpu, ',device count:', ch.cuda.device_count())
@@ -606,11 +653,11 @@ class ImageNetTrainer:
         if mixup:
             self.aux_loss = ch.nn.CrossEntropyLoss(label_smoothing=label_smoothing)
             def mixuploss(output, target):
-                loss_1 = self.aux_loss(output, target[:, 0].long())
-                loss_2 = self.aux_loss(output, target[:, 1].long())
+                soft_target_1 = ch.nn.functional.one_hot(target[:, 0].long(), 1000).float()
+                soft_target_2 = ch.nn.functional.one_hot(target[:, 1].long(), 1000).float()
                 lam = target[0, 2]
-                loss_train = loss_1 * lam + loss_2 * (1-lam)
-                return loss_train
+                soft_target = soft_target_1 * lam + soft_target_2 * (1-lam)
+                return self.aux_loss(output, soft_target)
             self.train_loss_func = mixuploss
             self.test_loss_func = ch.nn.CrossEntropyLoss(label_smoothing=label_smoothing)
         else:
@@ -621,12 +668,14 @@ class ImageNetTrainer:
         else:
             self.train_adv_loss_func = ch.nn.CrossEntropyLoss(label_smoothing=adv_loss_smooth)
 
-    @param('data.torch_loader')
-    def create_train_loader(self, torch_loader=0):
-        if torch_loader:
-            return self.create_train_loader_torch()
-        else:
+    @param('data.loader_type')
+    def create_train_loader(self, loader_type='ffcv'):
+        if loader_type == 'ffcv':
             return self.create_train_loader_ffcv()
+        elif loader_type == 'wb':
+            return self.create_train_loader_torch()
+        elif loader_type == 'tf':
+            return self.create_train_loader_tf()
 
     @param('data.train_dataset')
     @param('data.num_workers')
@@ -671,7 +720,7 @@ class ImageNetTrainer:
             image_pipeline.insert(2, mixup_img)
             label_pipeline.insert(1, mixup_label)
         if randaug:
-            image_pipeline.insert(2, ffcv.transforms.RandAugment(num_ops=randaug_num_ops, magnitude=randaug_magnitude))
+            image_pipeline.insert(2, RandAugmentV3(num_ops=randaug_num_ops, magnitude=randaug_magnitude))
         order = OrderOption.RANDOM if distributed else OrderOption.QUASI_RANDOM
         loader = Loader(train_dataset,
                         batch_size=batch_size,
@@ -736,13 +785,59 @@ class ImageNetTrainer:
         return loader
 
 
+    @param('data.train_dataset')
+    @param('data.num_workers')
+    @param('training.batch_size')
+    @param('training.distributed')
+    @param('data.in_memory')
+    @param('training.mixup')
+    @param('training.randaug')
+    @param('training.randaug_num_ops')
+    @param('training.randaug_magnitude')
+    @param('training.mixed_precision')
+    @param('training.altnorm')
+    def create_train_loader_tf(self, train_dataset, num_workers, batch_size,
+                            distributed, in_memory, mixup, randaug=False, randaug_num_ops=None, randaug_magnitude=None, mixed_precision=True,
+                            altnorm=False):
+        def _preprocess_fn(data):
+            """The preprocessing function that is returned."""
 
-    @param('data.torch_loader')
-    def create_val_loader(self, torch_loader=0):
-        if torch_loader:
-            return self.create_val_loader_torch()
-        else:
+            # Apply all the individual steps in sequence.
+            ops = [
+                get_decode_jpeg_and_inception_crop(size=224),
+                get_random_flip_lr(),
+                get_randaug(2, 10),
+                get_value_range(-1, 1),
+                get_onehot(1000,
+                    key="label",
+                    key_result="labels"),
+                get_keep("image", "labels")
+            ]
+            for op in ops:
+                data = op(data)
+
+            return data
+        train_ds = input_pipeline.make_for_train_torch(
+            dataset='imagenet2012_folder',
+            split='train',
+            batch_size=batch_size,
+            preprocess_fn=_preprocess_fn,
+            shuffle_buffer_size=250_000,
+            cache_raw=True,
+            data_dir="/data/home/pingchiang/project/big_vision/imagenet2012")
+
+        train_ds.__len__ = lambda : 1_281_167 // batch_size // ch.distributed.get_world_size()
+        return train_ds
+
+
+    @param('data.loader_type')
+    def create_val_loader(self, loader_type='ffcv'):
+        if loader_type == 'ffcv':
             return self.create_val_loader_ffcv()
+        elif loader_type == 'wb':
+            return self.create_val_loader_torch()
+        elif loader_type == 'tf':
+            return self.create_val_loader_tf()
 
     @param('data.val_dataset')
     @param('data.num_workers')
@@ -817,6 +912,38 @@ class ImageNetTrainer:
             num_workers=num_workers, pin_memory=True, sampler=val_sampler)
         
         return val_loader
+    
+    @param('training.batch_size')
+    def create_val_loader_tf(self, batch_size):
+        def _preprocess_fn(data):
+            """The preprocessing function that is returned."""
+
+            # Apply all the individual steps in sequence.
+            ops = [
+                get_decode(),
+                get_resize_small(256),
+                get_central_crop(224),
+                get_value_range(-1, 1),
+                get_onehot(1000,
+                    key="label",
+                    key_result="labels"),
+                get_keep("image", "labels")
+            ]
+            for op in ops:
+                data = op(data)
+
+            return data
+        train_ds = input_pipeline.make_for_train_torch(
+            dataset='imagenet2012_folder',
+            split='validation',
+            batch_size=batch_size,
+            preprocess_fn=_preprocess_fn,
+            shuffle_buffer_size=250_000,
+            cache_raw=True,
+            data_dir="/data/home/pingchiang/project/big_vision/imagenet2012")
+
+        train_ds.__len__ = lambda : 50000 // batch_size // ch.distributed.get_world_size()
+        return train_ds
 
     @param('training.epochs')
     @param('logging.log_level')
@@ -891,7 +1018,7 @@ class ImageNetTrainer:
                 'val_time': val_time,
                 'epoch_time': (time.time() - self.last_log_time)/60,
                 'radius_multiplier': get_radius_multiplier(self.cur_epoch)
-                }, **extra_dict, **stats, **self.best_stats), step=extra_dict['epoch']
+                }, **extra_dict, **stats, **self.best_stats), step=extra_dict.get('epoch', 0)
                 )
                 self.last_log_time = time.time()
             
@@ -1030,16 +1157,11 @@ class ImageNetTrainer:
     @param('adv.cache_class_wise')
     @param('data.num_classes')
     @param('training.mixup')
-    @param('adv.radius_schedule')
     def adv_cache_pyramid(self, images, target, step_size_input=None, radius_input=None, 
     cache_frequency=1, cache_size_multiplier=1, cache_class_wise=False, num_classes=None,
-    mixup=None, cache_sequential=False, scale_factors=[32, 16, 1], m_factors=[20, 10, 1], radius_schedule=0):
+    mixup=None, cache_sequential=False, scale_factors=[32, 16, 1], m_factors=[20, 10, 1]):
         b_size = images.shape[0]
-        if radius_schedule:
-            radius_multiplier = get_radius_multiplier(self.cur_epoch)
-        else:
-            radius_multiplier = 1
-        if not hasattr(self, 'adv_cache_noise_pyramid'):
+        if not hasattr(self, 'adv_cache_noise'):
             self.adv_cache_noise_pyramid = []
             for scale_factor in scale_factors:
                 self.adv_cache_noise_pyramid.append(
@@ -1055,12 +1177,12 @@ class ImageNetTrainer:
                 for adv_cache_noise in self.adv_cache_noise_pyramid:
                     grad = adv_cache_noise.grad
                     adv_cache_noise.data += grad.sign() * step_size_input
-                    adv_cache_noise.data.clamp_(-radius_input*radius_multiplier, +radius_input*radius_multiplier)
+                    adv_cache_noise.data.clamp_(-radius_input, +radius_input)
             for adv_cache_noise in self.adv_cache_noise_pyramid:
                 adv_cache_noise.grad = None
 
         pyramid_noise = None
-        for noise, m_factor in zip(self.adv_cache_noise_pyramid,  m_factors):
+        for noise, scale_factor, m_factor in zip(self.adv_cache_noise_pyramid, scale_factors, m_factors):
             if pyramid_noise is None:
                 pyramid_noise = ch.nn.functional.upsample(noise, images.shape[2:])*m_factor
             else:
@@ -1200,17 +1322,18 @@ class ImageNetTrainer:
     @param('training.fixed_dropout')
     @param('training.mixed_precision')
     @param('adv.split_backward')
-    @param('data.torch_loader')
+    @param('data.loader_type')
     @param('training.mixup')
     @param('training.weight_decay_explicit')
     @param('training.weight_decay')
     @param('training.weight_decay_nolr')
+    @param('training.weight_decay_schedule')
     def train_loop(self, epoch, log_level, grad_clip_norm=None, num_steps=0, adv_loss_weight=0, radius=0, fixed_dropout=False, freeze_layers=None, split_backward=False, 
-    freeze_nonlayernorm=False, adv_loss_even=False, mixed_precision=True, torch_loader=0, mixup=0, weight_decay_explicit=0, weight_decay=0, weight_decay_nolr=0): 
+    freeze_nonlayernorm=False, adv_loss_even=False, mixed_precision=True, loader_type='ffcv', mixup=0, weight_decay_explicit=0, weight_decay=0, weight_decay_nolr=0, weight_decay_schedule=0): 
         model = self.model
         model.train()
         losses = []
-        losses_adv = []
+        losses_adv = [0]
         adv = num_steps > 0
         sam = radius > 0
 
@@ -1219,115 +1342,37 @@ class ImageNetTrainer:
         lrs = np.interp(np.arange(iters), [0, iters], [lr_start, lr_end])
 
         iterator = tqdm(self.train_loader, total=iters)
-        for ix, (images, target) in enumerate(iterator):
-            if torch_loader:
+        for ix, batch in zip(range(iters), iterator):            
+            if loader_type == 'wb':
+                images, target = batch
                 images, target = images.cuda(non_blocking=True), target.cuda(non_blocking=True)
-                if mixup:
-                    images, target = mixup_data(images, target, 0.2, True)
-                    
+                images, target = mixup_data(images, target, 0.2, True)
+            elif loader_type == 'ffcv':
+                images, target = batch
+                images, target = mixup_data_v2(images, target, 0.2, True)
+            elif loader_type == 'tf':
+                images = ch.from_numpy(np.asarray(batch['image'])).cuda()
+                images = images.permute(0, 3, 1, 2)
+                target = ch.from_numpy(np.asarray(batch['labels'])).cuda()
+                images, target = mixup_data_tf(images, target, 0.2, True)
+            
             ### Training start
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = lrs[ix]
             self.optimizer.zero_grad(set_to_none=True)
 
-            
-            # generate adversarial examples/intermediate adversarial examples
-            if adv:
-                if hasattr(self.model.module, 'make_adv'):
-                    self.model.module.make_adv()
-                images_adv, features_adv = self.adv_step(self.model, images, target)
-            if fixed_dropout:
-                fixed_seed = ch.randint(0, 999999, size=(1,), device=images.device)
-            with autocast(enabled=bool(mixed_precision)):
-                if sam:
-                    with self.model.no_sync():
-                        if fixed_dropout:
-                            ch.cuda.manual_seed(fixed_seed)
-                        output = self.model(images)
-                        loss_train = self.train_loss_func(output, target)
-                        loss_train.backward()
-                        #calculate norm of grad
-                        norm = 0
-                        for para in self.model.parameters():
-                            norm += (para.grad**2).sum()
-                        norm = norm**0.5
-                        for para in self.model.parameters():
-                            para.pert = para.grad/norm*radius
-                            para.data += para.pert
-                            para.grad = None
-                
-                if hasattr(self.model.module, 'make_clean'):
-                    self.model.module.make_clean()
-                
-                output = self.model(images)
-                loss_train = self.train_loss_func(output, target)
-                if split_backward:
-                    # add dummy loss from parameters
-                    with self.model.no_sync():
-                        dummy_loss = sum([para.sum()*0 for para in model.parameters()])
-                        if adv_loss_even:
-                            self.scaler.scale(loss_train+dummy_loss).backward()
-                        else:
-                            self.scaler.scale(loss_train*(1-adv_loss_weight)+dummy_loss).backward()
-                if adv:
-                    if hasattr(self.model.module, 'make_adv'):
-                        self.model.module.make_adv()
-                    
-                    # generate adversarial data augmentation if it is a thing
-                    if hasattr(self, 'adv_augment'):
-                        self.adv_augment.update() # update adversarial data augmentation
-                        aug = self.adv_augment.augment
-                    else:
-                        aug = lambda x: x
-                    if isinstance(self.model.module, ResNet) or isinstance(self.model.module, VisionTransformer):
-                        output_adv = self.model(aug(images+images_adv))
-                    else:
-                        output_adv = self.model(aug(images+images_adv), feature_noise=features_adv, freeze_layers=freeze_layers)
-                    if self.rank == 0:
-                        # log some images to wandb
-                        if ix == 0:
-                            clean_img_arr = make_grid(images, normalize=True)
-                            adv_img_arr = make_grid(aug(images+images_adv), normalize=True)
-                            clean_img = wandb.Image(clean_img_arr, caption="clean images")
-                            adv_img = wandb.Image(adv_img_arr, caption="adv images")
-                            wandb.log(
-                                {'clean_img': clean_img,
-                                "adv_img": adv_img},
-                                commit=False
-                                )
-                    loss_train_adv = self.train_adv_loss_func(output_adv, target)
-                    dummy_loss = sum([para.sum()*0 for para in model.parameters()])
-                    if split_backward:
-                        if adv_loss_even:
-                            self.scaler.scale(loss_train_adv+dummy_loss).backward()
-                        else:
-                            self.scaler.scale(loss_train_adv*(adv_loss_weight)+dummy_loss).backward()
-                    else:
-                        if adv_loss_even:
-                            loss_train = loss_train_adv + loss_train + dummy_loss
-                        else:
-                            loss_train = loss_train_adv * adv_loss_weight + loss_train * (1-adv_loss_weight) + dummy_loss
-                else:
-                    loss_train_adv= ch.tensor(0)
-            if not split_backward:
-                self.scaler.scale(loss_train).backward()
+
+            output = self.model(images)
+            loss_train = self.train_loss_func(output, target)
+            loss_train.backward()
             # Unscales the gradients of optimizer's assigned params in-place
-            self.scaler.unscale_(self.optimizer)
-            if hasattr(self, 'adv_cache_noise'):
-                self.adv_cache_noise.grad.data /= self.scaler.get_scale()
-            if freeze_nonlayernorm:
-                for name, para in model.named_parameters():
-                    if 'norm' in name:
-                        pass
-                    else:
-                        para.grad.detach_()
-                        para.grad.zero_()
+            
 
             # Since the gradients of optimizer's assigned params are unscaled, clips as usual:
             if grad_clip_norm is not None:
                 ch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
 
-            self.scaler.step(self.optimizer)
+            self.optimizer.step()
             # explicitly implement weight decay
             if weight_decay_explicit:
                 params = self.optimizer.param_groups[1]['params']
@@ -1335,19 +1380,16 @@ class ImageNetTrainer:
                 for para in params:
                     if weight_decay_nolr:
                         para.data -= para.data * weight_decay
+                    elif weight_decay_schedule:
+                        para.data -= para.data * cur_lr/0.001 * weight_decay
                     else:
                         para.data -= para.data * cur_lr * weight_decay
-            self.scaler.update()
-            if sam:
-                for i, para in enumerate(self.model.parameters()):
-                    para.data -= para.pert
                 
             ### Training end
 
             ### Logging start
             if log_level > 0:
                 losses.append(loss_train.detach())
-                losses_adv.append(loss_train_adv.detach())
                 group_lrs = []
                 for _, group in enumerate(self.optimizer.param_groups):
                     group_lrs.append(f'{group["lr"]:.3f}')
@@ -1361,107 +1403,37 @@ class ImageNetTrainer:
                 msg = ', '.join(f'{n}={v}' for n, v in zip(names, values))
                 iterator.set_description(msg)
             ### Logging end
-        return (sum(losses)/len(losses)).item(), (sum(losses_adv)/len(losses_adv)).item()
+        return (sum(losses)/len(losses)).item(), 0
 
 
     @param('validation.lr_tta')
     @param('eval.layernorm_switch')
     @param('training.mixed_precision')
-    @param('data.torch_loader')
-    def val_loop(self, lr_tta, layernorm_switch, mixed_precision=True, torch_loader=0):
+    @param('data.loader_type')
+    def val_loop(self, lr_tta, layernorm_switch, mixed_precision=True, loader_type=0):
         model = self.model
         model.eval()
         stats = {}
-        if layernorm_switch:
-            for factor in np.linspace(0, 1, 11):
-                for l_i, layer in enumerate(self.model.module.blocks):
-                    # switching a certain layer to adv layernorm
-                    self.model.module.make_clean()
-                    for module in layer.modules():
-                        if isinstance(module, LayerNormDecoupled):
-                            module.make_adv(factor=factor)
-                    
-                    with ch.no_grad():
-                        with autocast(enabled=bool(mixed_precision)):
-                            for images, target in tqdm(self.val_loader):
-                                output = self.model(images)
-                                if lr_tta:
-                                    output += self.model(ch.flip(images, dims=[3]))
-
-                                for k in ['top_1', 'top_5']:
-                                    self.val_meters[k](output, target)
-
-                                loss_val = self.test_loss_func(output, target)
-                                self.val_meters['loss'](loss_val)
-
-                    stats = {f"{k}_adv{l_i}_f{factor}": m.compute().item() for k, m in self.val_meters.items()} | stats
-                    [meter.reset() for meter in self.val_meters.values()]
-            
-            # greedy layernorm soup
-            self.model.module.make_clean()
-           
-            best_acc = None
-            for l_i, layer in enumerate(self.model.module.blocks[::-1]):
-                best_factor_curlayer = 0
-                for factor in np.linspace(0, 1, 11):
-                    # switching a certain layer to adv layernorm
-                    for module in layer.modules():
-                        if isinstance(module, LayerNormDecoupled):
-                            module.make_adv(factor=factor)
-                    
-                    with ch.no_grad():
-                        with autocast(enabled=bool(mixed_precision)):
-                            for images, target in tqdm(self.val_loader):
-                                output = self.model(images)
-                                if lr_tta:
-                                    output += self.model(ch.flip(images, dims=[3]))
-
-                                for k in ['top_1', 'top_5']:
-                                    self.val_meters[k](output, target)
-
-                                loss_val = self.test_loss_func(output, target)
-                                self.val_meters['loss'](loss_val)
-                    curr_acc = self.val_meters['top_1'].compute().item()
-
-                    [meter.reset() for meter in self.val_meters.values()]
-                    if best_acc is None or curr_acc > best_acc:
-                        best_acc = curr_acc
-                        best_factor_curlayer = factor
-                for module in layer.modules():
-                    if isinstance(module, LayerNormDecoupled):
-                        module.make_adv(factor=best_factor_curlayer)
-
-            with ch.no_grad():
-                with autocast(enabled=bool(mixed_precision)):
-                    for images, target in tqdm(self.val_loader):
-                        output = self.model(images)
-                        if lr_tta:
-                            output += self.model(ch.flip(images, dims=[3]))
-
-                        for k in ['top_1', 'top_5']:
-                            self.val_meters[k](output, target)
-
-                        loss_val = self.test_loss_func(output, target)
-                        self.val_meters['loss'](loss_val)
-
-            stats = {f"{k}_greedy": m.compute().item() for k, m in self.val_meters.items()} | stats
-            [meter.reset() for meter in self.val_meters.values()]
-        if isinstance(self.model.module, SimpleViTDecoupledLN) or isinstance(self.model.module, MViTDecoupled) :
-            self.model.module.make_clean()
+        
         with ch.no_grad():
-            with autocast(enabled=bool(mixed_precision)):
-                for images, target in tqdm(self.val_loader):
-                    if torch_loader:
-                        images, target = images.cuda(), target.cuda()
-                    output = self.model(images)
-                    if lr_tta:
-                        output += self.model(ch.flip(images, dims=[3]))
+            for i, batch  in tqdm(zip(range(self.val_loader.__len__()), self.val_loader)):
+                if loader_type == 'wb':
+                    images, target = batch
+                    images, target = images.cuda(), target.cuda()
+                elif loader_type == 'tf':
+                    images = ch.from_numpy(np.asarray(batch['image'])).cuda()
+                    images = images.permute(0, 3, 1, 2)
+                    target = ch.from_numpy(np.asarray(batch['labels'])).cuda()
+                    target = target.argmax(dim=1)
+                elif loader_type == 'ffcv':
+                    images, target = batch
+                output = self.model(images)
 
-                    for k in ['top_1', 'top_5']:
-                        self.val_meters[k](output, target)
+                for k in ['top_1', 'top_5']:
+                    self.val_meters[k](output, target)
 
-                    loss_val = self.test_loss_func(output, target)
-                    self.val_meters['loss'](loss_val)
+                loss_val = self.test_loss_func(output, target)
+                self.val_meters['loss'](loss_val)
 
         stats = {k: m.compute().item() for k, m in self.val_meters.items()} | stats
         [meter.reset() for meter in self.val_meters.values()]
@@ -1519,13 +1491,16 @@ class ImageNetTrainer:
                 cls.exec(rank=int(rank))
             else:
                 ch.multiprocessing.spawn(cls._exec_wrapper, nprocs=world_size, join=True)
+                print("finishing")
         else:
             cls.exec(0)
 
     @classmethod
     def _exec_wrapper(cls, *args, **kwargs):
         make_config(quiet=True)
+        print("before exec")
         cls.exec(*args, **kwargs)
+        print("after exec")
     @classmethod
     @param('training.distributed')
     @param('training.eval_only')
@@ -1538,6 +1513,7 @@ class ImageNetTrainer:
 
         if distributed:
             trainer.cleanup_distributed()
+        print("End"*10)
 
 # Utils
 class MeanScalarMetric(torchmetrics.Metric):

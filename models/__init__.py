@@ -8,9 +8,9 @@ from .mvit_config import get_cfg
 from torchvision import models
 import torch as ch
 import torch.nn as nn
-from timm.models.vision_transformer import VisionTransformer
+# from timm.models.vision_transformer import VisionTransformer
 from .simple_vit_decoupled import LayerNormDecoupled
-from .simple_vit_decoupled_v2 import SimpleViTDecoupledLayernorm_v2
+from .simple_vit_decoupled_v2 import SimpleViTDecoupledLayernorm_v2, SimpleViTDecoupled_Universal
 from .simple_vit_v2 import SimpleViT_v2
 from .simple_vit_v3 import SimpleViT_v3
 class BatchNormDecoupled(nn.Module):
@@ -168,6 +168,18 @@ def get_arch(arch_name, num_classes, probe=False, split_layer=None):
     
     elif arch_name == 'vit_s_decoupled_v5':
         model = SimpleViTDecoupledLayernorm_v2(
+            image_size = 224,
+            patch_size = 16,
+            num_classes = num_classes,
+            dim = 384,
+            depth = 12,
+            heads = 6,
+            mlp_dim = 384*4
+        )
+        model._reset_parameters()
+        return model
+    elif arch_name == 'vit_s_decoupled_universal_v5':
+        model = SimpleViTDecoupled_Universal(
             image_size = 224,
             patch_size = 16,
             num_classes = num_classes,

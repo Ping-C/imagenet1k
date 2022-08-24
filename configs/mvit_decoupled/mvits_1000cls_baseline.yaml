@@ -2,8 +2,8 @@ data:
   in_memory: 1
   num_workers: 4
   num_classes: 1000
-  train_dataset: /data/home/pingchiang/data/imagenet_ffcv/train_400_0.1_90.ffcv
-  val_dataset: /data/home/pingchiang/data/imagenet_ffcv/val_400_0.1_90.ffcv
+  train_dataset: /data/home/pingchiang/data/imagenet_ffcv/train_500_0.50_90.ffcv
+  val_dataset: /data/home/pingchiang/data/imagenet_ffcv/val_500_0.50_90.ffcv
 dist:
   world_size: 8
 logging:

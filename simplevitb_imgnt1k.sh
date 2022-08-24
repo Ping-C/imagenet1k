@@ -68,11 +68,15 @@ command_list[12]="python train_imagenet.py --config-file configs/simplevit/vits_
 command_list[13]="python train_imagenet.py --config-file configs/simplevit/vits_1000cls_advpyramid.yaml --adv.radius_input=0.04 --adv.step_size_input=0.015 --adv.num_steps=3        --model.arch=vit_b_v5           --logging.project_name imgnt1K_simplevitb --logging.resume_id=simplevitb1000epoch300bn --logging.folder outputs/simplevits_1K/advinputpyramid_r0.04s0.015c3  $SHARED_PARAM"
 command_list[14]="python train_imagenet.py --config-file configs/simplevit/vits_1000cls_advpyramid.yaml --adv.radius_input=0.04 --adv.step_size_input=0.01  --adv.num_steps=5        --model.arch=vit_b_v5           --logging.project_name imgnt1K_simplevitb --logging.resume_id=simplevitb1000epoch300bo --logging.folder outputs/simplevits_1K/advinputpyramid_r0.04s0.01c5 $SHARED_PARAM"
 
+#advcache pyramid
+CACHE="--adv.adv_cache=1 --adv.radius_schedule=1 --radius.schedule_type=linear_decrease --radius.start_epoch=30 --radius.min_multiplier=0"
+command_list[15]="python train_imagenet.py --config-file configs/simplevit/vits_1000cls_advpyramid.yaml --adv.radius_input=0.06 --adv.step_size_input=0.012  $CACHE        --model.arch=vit_b_v5           --logging.project_name imgnt1K_simplevitb --logging.resume_id=simplevitb1000epoch300bp --logging.folder outputs/simplevits_1K/advinputpyramidcache_r0.06s0.012_decrease  $SHARED_PARAM"
+
 
 
 # jobs for adversarial finetuning
 cur_command=${command_list[SLURM_ARRAY_TASK_ID]}
 echo $cur_command
-eval "srun $cur_command"
+eval "$cur_command"
 # eval "srun -n $SLURM_NTASKS $cur_command"
 
