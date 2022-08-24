@@ -189,7 +189,8 @@ Section('dist', 'distributed training options').params(
     world_size=Param(int, 'number gpus', default=1),
     address=Param(str, 'address', default='localhost'),
     port=Param(str, 'port', default='12355'),
-    multinode=Param(int, 'multinode', default=0)
+    multinode=Param(int, 'multinode', default=0),
+    rank=Param(int, 'rank of node if not specified grabs the SLURM_PROCID ')
 )
 
 
@@ -1510,11 +1511,13 @@ class ImageNetTrainer:
     @param('training.distributed')
     @param('dist.world_size')
     @param('dist.multinode')
-    def launch_from_args(cls, distributed, world_size, multinode=False):
+    @param('dist.rank')
+    def launch_from_args(cls, distributed, world_size, multinode=False, rank=None):
         if distributed:
             if multinode:
                 # if using multinode mode, slurm will spawn the needed jobs, but each process needs ot get the rnak from process id
-                rank = os.environ['SLURM_PROCID']
+                if rank is None:
+                    rank = os.environ['SLURM_PROCID']
                 print(f"executing program for rank {rank}")
                 cls.exec(rank=int(rank))
             else:

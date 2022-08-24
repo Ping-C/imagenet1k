@@ -7,7 +7,7 @@ cp -r /data/home/pingchiang/data/imagenet_ffcv /data/home/yipinzhou/
 conda config --env --set channel_priority flexible
 conda create -y -n ffcv python=3.9 cupy pkg-config compilers libjpeg-turbo opencv pytorch torchvision cudatoolkit=11.3 numba -c pytorch -c conda-forge
 conda activate ffcv
-pip install torchmetrics fvcore tensorflow tensorflow-datasets tensorflow_addons timm einops kornia wandb
+pip install torchmetrics fvcore tensorflow tensorflow-datasets tensorflow_addons timm einops kornia wandb submitit
 
 git clone https://github.com/ashertrockman/ffcv.git
 cd ffcv
