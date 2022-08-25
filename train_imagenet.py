@@ -41,7 +41,7 @@ import torchvision
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import webdataset as wds
-
+import datetime
 class DictChecker(Checker):
     def check(self, value):
         return json.loads(value)
@@ -134,6 +134,7 @@ Section('training', 'training hyper param stuff').params(
     freeze_nonlayernorm_epochs=Param(int, 'use blurpool?', default=None),
     mixed_precision=Param(int, 'whether to use mixed precision training', default=1),
     altnorm=Param(int, 'whether to use alternative normalization', default=0),
+    fake_bug=Param(int, 'whether to raise a fake exception for debugging purposes', default=0),
 )
 
 Section('adv', 'hyper parameter related to adversarial training').params(
@@ -494,7 +495,7 @@ class ImageNetTrainer:
         os.environ['MASTER_ADDR'] = address
         os.environ['MASTER_PORT'] = port
 
-        dist.init_process_group("nccl", rank=self.rank, world_size=world_size)
+        dist.init_process_group("nccl", rank=self.rank, world_size=world_size, timeout=datetime.timedelta(seconds=1200))
         ch.cuda.set_device(self.gpu)
 
     def cleanup_distributed(self):
@@ -823,7 +824,10 @@ class ImageNetTrainer:
     @param('logging.log_level')
     @param('logging.save_checkpoint_interval')
     @param('training.freeze_nonlayernorm_epochs')
-    def train(self, epochs, log_level, save_checkpoint_interval, freeze_nonlayernorm_epochs=None, reset_layernorm=False):
+    @param('training.fake_bug')
+    def train(self, epochs, log_level, save_checkpoint_interval, freeze_nonlayernorm_epochs=None, reset_layernorm=False, fake_bug=0):
+        if fake_bug:
+            raise ValueError("Random fake bug for testing")
         for epoch in range(self.starting_epoch, epochs):
             self.cur_epoch = epoch
             try:

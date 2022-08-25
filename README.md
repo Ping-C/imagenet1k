@@ -16,6 +16,7 @@ conda init
 conda config --env --set channel_priority flexible
 conda create -y -n ffcv python=3.9 cupy pkg-config compilers libjpeg-turbo opencv pytorch torchvision cudatoolkit=11.3 numba -c pytorch -c conda-forge
 conda activate ffcv
+conda env config vars set NCCL_NSOCKS_PERTHREAD=4 NCCL_SOCKET_NTHREADS=2 NCC_INFO=INFO NCCL_SOCKET_IFNAME=ens32
 pip install torchmetrics fvcore tensorflow tensorflow-datasets tensorflow_addons timm einops kornia wandb submitit
 git clone https://github.com/ashertrockman/ffcv.git
 cd ffcv
@@ -47,3 +48,4 @@ python train_imagenet_removehalf.py --config-file configs/simplevit/vits_1000cls
 
 # Setting environment variable for submitit
 TOBECOMPLETED
+```conda env config vars set NCCL_NSOCKS_PERTHREAD=4 NCCL_SOCKET_NTHREADS=2 NCC_INFO=INFO NCCL_SOCKET_IFNAME=ens32 NCCL_BLOCKING_WAIT=1```
