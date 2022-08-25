@@ -11,6 +11,7 @@ parser.add_argument('--command', default="python train_imagenet.py --config-file
 parser.add_argument('--log_folder', default='slurm_log', help='folder to store outputs')
 parser.add_argument('--time_limit_minutes', type=int, default=60*24, help='timelimit in minutes')
 parser.add_argument('--test_node_failure', action='store_true', help='timelimit in minutes')
+parser.add_argument('--partition', default='lowpri', choices=[ 'hipri', 'lowpri' ], help='partition to use' )
 args = parser.parse_args()
 
 
@@ -66,7 +67,7 @@ while requeue and requeue_unknown_count < requeue_limit:
     print(f"running command: {args.command}")
     print(f"world_size: {world_size}")
     print(f"excluded nodes: {excluded_nodes}")
-    executor.update_parameters(job_name='img1k', time=max_minutes, partition="hipri", account='all', cpus_per_task=8, additional_parameters={'ntasks': world_size, 'gpus_per_task': 1}, exclude=",".join(excluded_nodes), nodes='1-8')
+    executor.update_parameters(job_name='img1k', time=max_minutes, partition=args.partition, account='all', cpus_per_task=8, additional_parameters={'ntasks': world_size, 'gpus_per_task': 1}, exclude=",".join(excluded_nodes), nodes='1-8')
     job = executor.submit(function)  # just a list of jobs
     # there are different failure cases that we need to catch and deal with
     # monitor the jobs, until all tasks are at least launched, and maybe monitor the progress?
