@@ -46,6 +46,8 @@ srun --gres=gpu:8 --cpus-per-gpu=8 --partition=hipri --account=all --pty /bin/ba
 python train_imagenet_removehalf.py --config-file configs/simplevit/vits_1000cls.yaml --training.batch_size=128 --model.arch=vit_s_v7 --training.altnorm=1 --lr.warmup_epochs=8 --training.epochs=300 --logging.project_name test --training.weight_decay_explicit=1 --logging.resume_id=test --logging.folder outputs/test --dist.world_size=8 --dist.multinode=0 --data.loader_type=ffcv --training.mixup=0 --training.weight_decay_schedule=1
 ```
 
-# Setting environment variable for submitit
-TOBECOMPLETED
-```conda env config vars set NCCL_NSOCKS_PERTHREAD=4 NCCL_SOCKET_NTHREADS=2 NCC_INFO=INFO NCCL_SOCKET_IFNAME=ens32 NCCL_BLOCKING_WAIT=1```
+# Launch jobs with submitit
+The following script automatically find nodes on the cluster and use any available fragmented resources at the time. It also relaunches the job when it times out and deals with node failures.
+```
+python -u launch.py --command="python train_imagenet.py --config-file configs/vit_100cls.yaml --training.epochs=3 --logging.folder outputs/test_success --logging.project_name test --dist.world_size=4 --data.num_workers=4" &> test1_success.log &
+```
