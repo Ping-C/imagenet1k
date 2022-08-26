@@ -67,7 +67,7 @@ while requeue and requeue_unknown_count < requeue_limit:
     print(f"running command: {args.command}")
     print(f"world_size: {world_size}")
     print(f"excluded nodes: {excluded_nodes}")
-    executor.update_parameters(job_name='img1k', time=max_minutes, partition=args.partition, account='all', cpus_per_task=8, additional_parameters={'ntasks': world_size, 'gpus_per_task': 1}, exclude=",".join(excluded_nodes), nodes='1-8')
+    executor.update_parameters(job_name='img1k', time=max_minutes, partition=args.partition, cpus_per_task=8, additional_parameters={'ntasks': world_size, 'gpus_per_task': 1, 'account': 'all'}, exclude=",".join(excluded_nodes), nodes='1-8')
     job = executor.submit(function)  # just a list of jobs
     # there are different failure cases that we need to catch and deal with
     # monitor the jobs, until all tasks are at least launched, and maybe monitor the progress?

@@ -42,6 +42,7 @@ import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import webdataset as wds
 import datetime
+from randaugment_v2 import RandAugmentV2, RandAugmentV3
 class DictChecker(Checker):
     def check(self, value):
         return json.loads(value)
@@ -129,6 +130,7 @@ Section('training', 'training hyper param stuff').params(
     randaug=Param(int, 'random augmentation', default=0),
     randaug_num_ops=Param(int, 'number of composable random augmentation', default=2),
     randaug_magnitude=Param(int, 'magnitude of random augmentation', default=15),
+    randaug_version=Param(str, 'v1, v2, v3', default='v1'),
     distributed=Param(int, 'is distributed?', default=0),
     use_blurpool=Param(int, 'use blurpool?', default=0),
     freeze_nonlayernorm_epochs=Param(int, 'use blurpool?', default=None),
@@ -639,10 +641,11 @@ class ImageNetTrainer:
     @param('training.randaug')
     @param('training.randaug_num_ops')
     @param('training.randaug_magnitude')
+    @param('training.randaug_version')
     @param('training.mixed_precision')
     @param('training.altnorm')
     def create_train_loader_ffcv(self, train_dataset, num_workers, batch_size,
-                            distributed, in_memory, mixup, randaug=False, randaug_num_ops=None, randaug_magnitude=None, mixed_precision=True,
+                            distributed, in_memory, mixup, randaug=False, randaug_num_ops=None, randaug_magnitude=None, randaug_version=None, mixed_precision=True,
                             altnorm=False):
         this_device = f'cuda:{self.gpu}'
         train_path = Path(train_dataset)
@@ -673,7 +676,14 @@ class ImageNetTrainer:
             image_pipeline.insert(2, mixup_img)
             label_pipeline.insert(1, mixup_label)
         if randaug:
-            image_pipeline.insert(2, ffcv.transforms.RandAugment(num_ops=randaug_num_ops, magnitude=randaug_magnitude))
+            if randaug_version == 'v1':
+                image_pipeline.insert(2, ffcv.transforms.RandAugment(num_ops=randaug_num_ops, magnitude=randaug_magnitude))
+            elif randaug_version == 'v2':
+                image_pipeline.insert(2, RandAugmentV2(num_ops=randaug_num_ops, magnitude=randaug_magnitude))
+            elif randaug_version == 'v3':
+                image_pipeline.insert(2, RandAugmentV3(num_ops=randaug_num_ops, magnitude=randaug_magnitude))
+            else:
+                raise ValueError(f'randaug_version {randaug_version} is not available')
         order = OrderOption.RANDOM if distributed else OrderOption.QUASI_RANDOM
         loader = Loader(train_dataset,
                         batch_size=batch_size,
@@ -1263,17 +1273,20 @@ class ImageNetTrainer:
                 
                 if hasattr(self.model.module, 'make_clean'):
                     self.model.module.make_clean()
-                
-                output = self.model(images)
-                loss_train = self.train_loss_func(output, target)
-                if split_backward:
-                    # add dummy loss from parameters
-                    with self.model.no_sync():
-                        dummy_loss = sum([para.sum()*0 for para in model.parameters()])
-                        if adv_loss_even:
-                            self.scaler.scale(loss_train+dummy_loss).backward()
-                        else:
-                            self.scaler.scale(loss_train*(1-adv_loss_weight)+dummy_loss).backward()
+                if adv_loss_weight != 1:
+                    # only do clean training when adv_loss weight is not 1
+                    output = self.model(images)
+                    loss_train = self.train_loss_func(output, target)
+                    if split_backward:
+                        # add dummy loss from parameters
+                        with self.model.no_sync():
+                            dummy_loss = sum([para.sum()*0 for para in model.parameters()])
+                            if adv_loss_even:
+                                self.scaler.scale(loss_train+dummy_loss).backward()
+                            else:
+                                self.scaler.scale(loss_train*(1-adv_loss_weight)+dummy_loss).backward()
+                else:
+                    loss_train = 0
                 if adv:
                     if hasattr(self.model.module, 'make_adv'):
                         self.model.module.make_adv()

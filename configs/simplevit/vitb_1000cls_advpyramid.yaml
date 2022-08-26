@@ -1,0 +1,50 @@
+data:
+  in_memory: 1
+  num_workers: 8
+  num_classes: 1000
+  train_dataset: /data/home/pingchiang/data/imagenet_ffcv/train_500_0.50_90.ffcv
+  val_dataset: /data/home/pingchiang/data/imagenet_ffcv/val_500_0.50_90.ffcv
+dist:
+  world_size: 16
+logging:
+  folder: '.'
+  log_level: 2
+lr:
+  lr: 0.001
+  lr_schedule_type: cyclic_warm
+  warmup_epochs: 8
+model:
+  arch: vit_b_v7
+resolution:
+  end_ramp: 13
+  max_res: 224
+  min_res: 224
+  start_ramp: 11
+training:
+  batch_size: 64
+  bn_wd: 0
+  distributed: 1
+  epochs: 300
+  altnorm: 1
+  label_smoothing: 0
+  optimizer: adamw
+  grad_clip_norm: 1.0
+  weight_decay: 0.1
+  weight_decay_explicit: 1
+  use_blurpool: 0
+  mixup: 1
+  randaug: 1 
+  randaug_num_ops: 2
+  randaug_magnitude: 10
+  randaug_version: v3
+  mixed_precision: 0
+validation:
+  batch_size: 64
+  lr_tta: 0
+  resolution: 224
+adv:
+  num_steps: 1
+  radius_input: 0.06
+  step_size_input: 0.06
+  adv_loss_weight: 0.5
+  pyramid: 1

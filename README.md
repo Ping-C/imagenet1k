@@ -24,10 +24,25 @@ git checkout randaug
 python setup.py install
 ```
 
-# Environemnt Set Up - Option 2
+# Environemnt Set Up - Option 2 
 ```
 source /data/home/pingchiang/miniconda/etc/profile.d/conda.sh
-conda activate ffcv_v2
+conda activate ffcv_v5
+```
+
+# Environemnt Set Up - Option 3 (This should make multinode job run faster?)
+```
+conda create -n ffcv_v5 --clone /data/home/vkhalidov/miniconda/envs/dino_env_2022_03_15_py39_pt111_cu113
+conda remove numpy
+conda install cupy pkg-config compilers libjpeg-turbo opencv cudatoolkit=11.3 numba==0.55.2 numpy==1.22.4 -c pytorch -c conda-forge
+
+git clone https://github.com/ashertrockman/ffcv.git
+cd ffcv
+git checkout randaug
+python setup.py install
+
+export MODULEPATH=/data/home/vkhalidov/modulefiles:$MODULEPATH
+module load cuda/11.3 nccl/2.9.9-cuda.11.3 nccl_efa/1.1.4-nccl.2.9.9-cuda.11.3
 ```
 
 # WandB Setup
@@ -51,3 +66,7 @@ The following script automatically find nodes on the cluster and use any availab
 ```
 python -u launch.py --command="python train_imagenet.py --config-file configs/vit_100cls.yaml --training.epochs=3 --logging.folder outputs/test_success --logging.project_name test --dist.world_size=4 --data.num_workers=4" &> test1_success.log &
 ```
+# other thing to add
+module load /data/home/vkhalidov/modulefiles/cuda/11.3
+module load /data/home/vkhalidov/modulefiles/nccl/2.12.7-cuda.11.3
+module load /data/home/vkhalidov/modulefiles/nccl_efa/1.2.0-nccl.2.12.7-cuda.11.3
