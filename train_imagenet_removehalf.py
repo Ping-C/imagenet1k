@@ -44,10 +44,14 @@ import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import webdataset as wds
 import sys
-sys.path.insert(0, '/data/home/pingchiang/project/big_vision')
-import big_vision.input_pipeline as input_pipeline
-from big_vision.pp.ops_image import *
-from big_vision.pp.ops_general_torch import *
+try:
+    # this only works at FAIR cluster
+    sys.path.insert(0, '/data/home/pingchiang/project/big_vision')
+    import big_vision.input_pipeline as input_pipeline
+    from big_vision.pp.ops_image import *
+    from big_vision.pp.ops_general_torch import *
+except:
+    pass
 import tensorflow as tf
 tf.config.set_visible_devices([], 'GPU')
 

@@ -1,0 +1,44 @@
+data:
+  in_memory: 1
+  num_workers: 8
+  num_classes: 1000
+  train_dataset: /fs/nexus-scratch/pchiang/imagenet_dataset/train_400_0.6_50.ffcv
+  val_dataset: /fs/nexus-scratch/pchiang/imagenet_dataset/val_400_0.6_50.ffcv
+dist:
+  world_size: 8
+  multinode: 0
+logging:
+  folder: ./outputs/simplevits_tune/simplevits_v1
+  log_level: 2
+lr:
+  lr: 0.001
+  lr_schedule_type: cyclic_warm
+  warmup_epochs: 8
+model:
+  arch: vit_s_v7
+resolution:
+  end_ramp: 13
+  max_res: 224
+  min_res: 224
+  start_ramp: 11
+training:
+  batch_size: 128
+  bn_wd: 0
+  distributed: 1
+  epochs: 300
+  altnorm: 1
+  label_smoothing: 0
+  optimizer: adamw
+  grad_clip_norm: 1.0
+  weight_decay: 0.1
+  weight_decay_explicit: 1
+  use_blurpool: 0
+  mixup: 1
+  randaug: 1 
+  randaug_num_ops: 2
+  randaug_magnitude: 10
+  mixed_precision: 0
+validation:
+  batch_size: 64
+  lr_tta: 0
+  resolution: 224
