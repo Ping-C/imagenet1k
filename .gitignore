@@ -7,3 +7,4 @@ wandb*
 random*
 slurm_log*
 .job*
+.nfs*
