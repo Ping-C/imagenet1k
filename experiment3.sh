@@ -20,6 +20,7 @@ export NCCL_SOCKET_IFNAME=ens32
 # 5. check that the data path is at the right location
 
 # copy jobs over before starting
+mkdir -p /data/home/yipinzhou/imagenet1k/outputs/mvits_imgnt1k
 cp -r /data/home/pingchiang/project/ffcv-imagenet/outputs/mvits_imgnt1k/baseline /data/home/yipinzhou/imagenet1k/outputs/mvits_imgnt1k/baseline
 cp -r /data/home/pingchiang/project/ffcv-imagenet/outputs/mvits_imgnt1k/pyramid_r0.04_s0.01_c5 /data/home/yipinzhou/imagenet1k/outputs/mvits_imgnt1k/pyramid_r0.04_s0.01_c5
 cp -r /data/home/pingchiang/project/ffcv-imagenet/outputs/mvits_imgnt1k/pyramidcache_r0.06_s0.012 /data/home/yipinzhou/imagenet1k/outputs/mvits_imgnt1k/pyramidcache_r0.06_s0.012
