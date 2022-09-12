@@ -130,6 +130,18 @@ def get_arch(arch_name, num_classes, probe=False, split_layer=None):
         )
         model._reset_parameters_v2()
         return model
+    elif arch_name == 'vit_s_v8':
+        model = SimpleViT_v3(
+            image_size = 224,
+            patch_size = 16,
+            num_classes = num_classes,
+            dim = 384,
+            depth = 12,
+            heads = 6,
+            mlp_dim = 384*4
+        )
+        model._reset_parameters_v3()
+        return model
     elif arch_name == 'vit_b_v5':
         model = SimpleViT_v2(
             image_size = 224,

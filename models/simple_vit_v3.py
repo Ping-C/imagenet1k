@@ -163,6 +163,16 @@ class SimpleViT_v3(nn.Module):
     def _reset_parameters_v2(self):
         self._reset_parameters()
         nn.init.zeros_(self.linear_head[0].weight.data)
+    def _reset_parameters_v3(self):
+        self._reset_parameters_v2()
+        for module in self.modules():
+            if isinstance(module, Attention):
+                fan_in = module.to_qkv.weight.shape[0]
+                fan_out = module.to_qkv.weight.shape[1]
+                modify_gain = torch.sqrt(torch.tensor((fan_in+fan_out)/(fan_in/3+fan_out)))
+                xavier_uniform_(module.to_qkv.weight, gain=modify_gain)
+        # fix initialization 
+        
 
     def forward(self, img, feature_noise={}, get_features=False, get_linear_probes=False, freeze_layers=None):
         *_, h, w, dtype = *img.shape, img.dtype
