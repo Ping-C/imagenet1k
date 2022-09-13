@@ -42,7 +42,8 @@ import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import webdataset as wds
 import datetime
-from randaugment_v2 import RandAugmentV2, RandAugmentV3
+from randaugment_v2 import RandAugmentV2, RandAugmentV3, RandAugmentV4
+
 class DictChecker(Checker):
     def check(self, value):
         return json.loads(value)
@@ -675,6 +676,7 @@ class ImageNetTrainer:
             mixup_label = ffcv.transforms.LabelMixup(0.2, True)
             image_pipeline.insert(2, mixup_img)
             label_pipeline.insert(1, mixup_label)
+        
         if randaug:
             if randaug_version == 'v1':
                 image_pipeline.insert(2, ffcv.transforms.RandAugment(num_ops=randaug_num_ops, magnitude=randaug_magnitude))
@@ -682,6 +684,8 @@ class ImageNetTrainer:
                 image_pipeline.insert(2, RandAugmentV2(num_ops=randaug_num_ops, magnitude=randaug_magnitude))
             elif randaug_version == 'v3':
                 image_pipeline.insert(2, RandAugmentV3(num_ops=randaug_num_ops, magnitude=randaug_magnitude))
+            elif randaug_version == 'v4':
+                image_pipeline.insert(2, RandAugmentV4(num_ops=randaug_num_ops, magnitude=randaug_magnitude))
             else:
                 raise ValueError(f'randaug_version {randaug_version} is not available')
         order = OrderOption.RANDOM if distributed else OrderOption.QUASI_RANDOM
