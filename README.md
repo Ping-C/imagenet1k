@@ -34,7 +34,8 @@ conda activate ffcv_v5
 ```
 conda create -n ffcv_v5 --clone /data/home/vkhalidov/miniconda/envs/dino_env_2022_03_15_py39_pt111_cu113
 conda remove numpy
-conda install cupy pkg-config compilers libjpeg-turbo opencv cudatoolkit=11.3 numba==0.55.2 numpy==1.22.4 -c pytorch -c conda-forge
+pip uninstall opencv-python
+conda install cupy pkg-config compilers libjpeg-turbo opencv cudatoolkit=11.3 numba numpy -c pytorch -c conda-forge
 
 git clone https://github.com/ashertrockman/ffcv.git
 cd ffcv
