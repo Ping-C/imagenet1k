@@ -405,7 +405,7 @@ if __name__ == "__main__":
     BATCH_SIZE = 512
     IMG_SIZE = 224
     image_pipelines = {
-        'with': [CenterCropRGBImageDecoder((224, 224), ratio=224/256), RandAugmentV2(2, 10), ToTensor()],
+        'with': [CenterCropRGBImageDecoder((224, 224), ratio=224/256), RandAugmentV4(2, 10), ToTensor()],
     }
     #RandAugment(num_ops=2, magnitude=15.0), 
     for name, pipeline in image_pipelines.items():
