@@ -42,6 +42,8 @@ cd ffcv
 git checkout randaug
 python setup.py install
 
+pip install torchmetrics fvcore tensorflow tensorflow-datasets tensorflow_addons timm einops kornia wandb submitit
+
 export MODULEPATH=/data/home/vkhalidov/modulefiles:$MODULEPATH
 module load cuda/11.3 nccl/2.9.9-cuda.11.3 nccl_efa/1.1.4-nccl.2.9.9-cuda.11.3
 ```

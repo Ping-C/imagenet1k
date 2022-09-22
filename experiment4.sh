@@ -11,4 +11,4 @@ export NCCL_SOCKET_NTHREADS=2
 export NCC_INFO=INFO
 export NCCL_SOCKET_IFNAME=ens32
 
-python -u launch.py --command="python train_imagenet.py --config-file configs/simplevit/vits_1000cls.yaml --logging.project_name imgnet1K_simplevits_fb --logging.resume_id=aab --logging.folder outputs/simplevits/baseline --dist.world_size=16" &> job_log/run4-1.log &
+python -u launch.py --command="python train_imagenet.py --config-file configs/simplevit/vits_1000cls.yaml --logging.project_name imgnet1K_simplevits_fb --logging.resume_id=fb_simplevits_aaa --logging.folder outputs/simplevits/baseline --dist.world_size=16" &> job_log/run4-1.log &
