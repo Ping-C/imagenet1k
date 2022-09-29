@@ -14,7 +14,7 @@ lr:
   lr_schedule_type: cyclic_warm
   warmup_epochs: 8
 model:
-  arch: vit_s_v5
+  arch: vit_s_v8
 resolution:
   end_ramp: 13
   max_res: 224
@@ -29,11 +29,12 @@ training:
   label_smoothing: 0
   optimizer: adamw
   grad_clip_norm: 1.0
-  weight_decay: 0.0001
+  weight_decay: 0.1
   weight_decay_explicit: 1
   use_blurpool: 0
   mixup: 1
   randaug: 1 
+  randaug_version: v4
   randaug_num_ops: 2
   randaug_magnitude: 10
   mixed_precision: 0

@@ -7,14 +7,14 @@ data:
 dist:
   world_size: 16
 logging:
-  folder: '.'
+  folder: ./outputs/simplevits_tune/simplevits_v1
   log_level: 2
 lr:
   lr: 0.001
   lr_schedule_type: cyclic_warm
   warmup_epochs: 8
 model:
-  arch: vit_b_v7
+  arch: vit_b_v8
 resolution:
   end_ramp: 13
   max_res: 224
@@ -34,9 +34,9 @@ training:
   use_blurpool: 0
   mixup: 1
   randaug: 1 
+  randaug_version: v4
   randaug_num_ops: 2
   randaug_magnitude: 10
-  randaug_version: v3
   mixed_precision: 0
 validation:
   batch_size: 64
@@ -48,3 +48,4 @@ adv:
   step_size_input: 0.06
   adv_loss_weight: 0.5
   pyramid: 1
+
