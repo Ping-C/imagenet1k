@@ -263,6 +263,8 @@ def get_radius_multiplier(epoch, schedule_type=None):
         return get_radius_multiplier_linear_increase(epoch)
     elif schedule_type == 'linear_decrease':
         return get_radius_multiplier_linear_decrease(epoch)
+    elif schedule_type == 'peak':
+        return get_radius_multiplier_linear_peak(epoch)
     elif schedule_type == 'wave':
         return get_radius_multiplier_wave(epoch)
     elif schedule_type == 'teeth':
@@ -274,7 +276,7 @@ def get_radius_multiplier(epoch, schedule_type=None):
 def get_radius_multiplier_linear_increase(epoch, start_epoch, max_multiplier, epochs):
     if epoch < start_epoch:
         return 1
-    return 1 + (epoch - start_epoch) / epochs * (max_multiplier -1)
+    return 1 + (epoch - start_epoch) / (epochs - start_epoch) * (max_multiplier -1)
 
 
 @param('radius.min_multiplier')
@@ -283,7 +285,17 @@ def get_radius_multiplier_linear_increase(epoch, start_epoch, max_multiplier, ep
 def get_radius_multiplier_linear_decrease(epoch, start_epoch, min_multiplier, epochs):
     if epoch < start_epoch:
         return 1
-    return 1 + (epoch - start_epoch) / epochs * (min_multiplier -1)
+    return 1 + (epoch - start_epoch) / (epochs - start_epoch) * (min_multiplier -1)
+
+@param('radius.min_multiplier')
+@param('radius.start_epoch')
+@param('training.epochs')
+def get_radius_multiplier_linear_peak(epoch, start_epoch, min_multiplier, epochs):
+    # increase the radius from min_multiplier until start_epoch and then decrease the radius until 
+    if epoch < start_epoch:
+        return (epoch) / start_epoch * (1-min_multiplier) + min_multiplier
+    else:
+        return 1 + (epoch - start_epoch) / (epochs - start_epoch) * (min_multiplier -1)
 
 @param('radius.start_epoch')
 @param('training.epochs')
@@ -953,17 +965,13 @@ class ImageNetTrainer:
     @param('training.mixup')
     @param('adv.optimizer')
     @param('adv.lr')
-    @param('adv.radius_schedule')
     @param('adv.cache_class_wise_shuffle_iter')
     def adv_cache(self, images, target, step_size_input=None, radius_input=None, 
     cache_frequency=1, cache_size_multiplier=1, cache_class_wise=False, num_classes=None,
-    mixup=None, cache_sequential=False, pyramid=0, optimizer='pgd', lr=None, beta=0.9, radius_schedule=False, cache_class_wise_shuffle_iter=float('inf')):
+    mixup=None, cache_sequential=False, pyramid=0, optimizer='pgd', lr=None, beta=0.9, radius_multiplier=1, cache_class_wise_shuffle_iter=float('inf')):
         if pyramid:
-            return self.adv_cache_pyramid(images, target)
-        if radius_schedule:
-            radius_multiplier = get_radius_multiplier(self.cur_epoch)
-        else:
-            radius_multiplier = 1
+            return self.adv_cache_pyramid(images, target, radius_multiplier=radius_multiplier)
+        
         if cache_class_wise:
             if not hasattr(self, 'adv_cache_noise'):
                 self.adv_cache_noise = ch.zeros((int(num_classes), *images.shape[1:]), device=images.device, dtype=images.dtype)
@@ -1052,12 +1060,9 @@ class ImageNetTrainer:
     @param('adv.radius_schedule')
     def adv_cache_pyramid(self, images, target, step_size_input=None, radius_input=None, 
     cache_frequency=1, cache_size_multiplier=1, cache_class_wise=False, num_classes=None,
-    mixup=None, cache_sequential=False, scale_factors=[32, 16, 1], m_factors=[20, 10, 1], radius_schedule=0):
+    mixup=None, cache_sequential=False, scale_factors=[32, 16, 1], m_factors=[20, 10, 1], radius_multiplier=1):
         b_size = images.shape[0]
-        if radius_schedule:
-            radius_multiplier = get_radius_multiplier(self.cur_epoch)
-        else:
-            radius_multiplier = 1
+
         if not hasattr(self, 'adv_cache_noise_pyramid'):
             self.adv_cache_noise_pyramid = []
             for scale_factor in scale_factors:
@@ -1109,11 +1114,11 @@ class ImageNetTrainer:
     @param('adv.pyramid')
     @param('training.mixed_precision')
     def adv_step(self, model, images, target,
-        num_steps=None, step_size_input=None, radius_input=None, adv_features=None, aux_branch=False, adv_cache=False, optimizer='pgd', lr=None, beta=0.9, mixed_precision=True, pyramid=False):
+        num_steps=None, step_size_input=None, radius_input=None, adv_features=None, aux_branch=False, adv_cache=False, optimizer='pgd', lr=None, beta=0.9, mixed_precision=True, pyramid=False, radius_multiplier=1):
         if adv_cache:
-            return self.adv_cache(images, target)
+            return self.adv_cache(images, target, radius_multiplier=radius_multiplier)
         if pyramid:
-            return self.adv_step_pyramid(model, images, target)
+            return self.adv_step_pyramid(model, images, target, radius_multiplier=radius_multiplier)
         input_adv_noise = ch.zeros_like(images, requires_grad=True)
         feature_adv_noise = FeatureNoise({int(layer): None for layer in adv_features} if adv_features is not None else {})
         for step in range(num_steps):
@@ -1142,8 +1147,8 @@ class ImageNetTrainer:
                         # normalize gradients to unit norm & times the radius
                         # grad /= (grad.norm(dim=ch.arange(1, len(grad.shape)).tolist(), keepdim=True, p=2) + 1e-5)
                         
-                        noise.data += grad.sign() * step_size
-                        noise.data.clamp_(-radius, +radius)
+                        noise.data += grad.sign() * step_size * radius_multiplier
+                        noise.data.clamp_(-radius * radius_multiplier, +radius * radius_multiplier)
                 elif optimizer == 'momentum':
                     if not hasattr(self, 'last_adv_grad'):
                         self.last_adv_grad = all_grad
@@ -1170,7 +1175,7 @@ class ImageNetTrainer:
     @param('data.num_classes')
     def adv_step_pyramid(self, model, images, target,
         num_steps=None, step_size_input=None, radius_input=None, mixed_precision=True,
-        scale_factors=[32, 16, 1], m_factors=[20, 10, 1], num_classes=None):
+        scale_factors=[32, 16, 1], m_factors=[20, 10, 1], num_classes=None, radius_multiplier=1):
         if not isinstance(scale_factors, list):
             scale_factors = [int(v) for v in scale_factors.split(',')]
         if not isinstance(m_factors, list):
@@ -1204,8 +1209,8 @@ class ImageNetTrainer:
                 all_grad = ch.autograd.grad(self.scaler.get_scale()*loss_adv, all_noises)
                 # apply perturbations to each individual features
                 for noise, grad in zip(all_noises, all_grad):
-                    noise.data -= grad.sign() * step_size_input
-                    noise.data.clamp_(-radius_input, +radius_input)
+                    noise.data -= grad.sign() * step_size_input * radius_multiplier
+                    noise.data.clamp_(-radius_input*radius_multiplier, +radius_input*radius_multiplier)
 
         return compose_pyramid_noise(all_noises).detach(), FeatureNoise({})
 
@@ -1254,7 +1259,7 @@ class ImageNetTrainer:
             if adv:
                 if hasattr(self.model.module, 'make_adv'):
                     self.model.module.make_adv()
-                images_adv, features_adv = self.adv_step(self.model, images, target)
+                images_adv, features_adv = self.adv_step(self.model, images, target, radius_multiplier=get_radius_multiplier(epoch = epoch))
             if fixed_dropout:
                 fixed_seed = ch.randint(0, 999999, size=(1,), device=images.device)
             with autocast(enabled=bool(mixed_precision)):
