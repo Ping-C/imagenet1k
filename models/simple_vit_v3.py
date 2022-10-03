@@ -56,7 +56,6 @@ class Attention(nn.Module):
         self.norm = nn.LayerNorm(dim)
 
         self.attend = nn.Softmax(dim = -1)
-        self.vis = False
 
         self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = True)
         self.to_out = nn.Linear(inner_dim, dim, bias = True)
@@ -70,12 +69,10 @@ class Attention(nn.Module):
         dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
 
         attn = self.attend(dots)
-        if self.vis:
-            self.attmap = attn.clone().detach()
 
         out = torch.matmul(attn, v)
         out = rearrange(out, 'b h n d -> b n (h d)')
-        return self.to_out(out)
+        return self.to_out(out), attn
 
     def _reset_parameters(self):
         print(f"applying xavier uniform for {self} + zero init")
@@ -95,11 +92,15 @@ class Transformer_v2(nn.Module):
                 Attention(dim, heads = heads, dim_head = dim_head),
                 FeedForward(dim, mlp_dim)
             ]))
-    def forward(self, x, feature_noise = {}, get_features=False, freeze_layers=None):
+    def forward(self, x, feature_noise = {}, get_features=False, freeze_layers=None, get_attention_maps=False):
         if get_features:
             features = {}
+        attmaps = []
         for li, (attn, ff) in enumerate(self.layers):
-            x = attn(x) + x
+            attn_x, attmap = attn(x)
+            if get_attention_maps:
+                attmaps.append(attmap[:, None])
+            x = attn_x + x
             x = ff(x) + x
             if li in feature_noise:
                 if feature_noise[li] is None:
@@ -109,6 +110,10 @@ class Transformer_v2(nn.Module):
                 x = x.detach()
             if get_features:
                 features[li] = x
+        
+        if get_attention_maps:
+            attmaps = torch.cat(attmaps, dim=1)
+            return x, attmaps
         if get_features:
             return x, features
         else:
@@ -177,12 +182,14 @@ class SimpleViT_v3(nn.Module):
         # fix initialization 
         
 
-    def forward(self, img, feature_noise={}, get_features=False, get_linear_probes=False, freeze_layers=None):
+    def forward(self, img, feature_noise={}, get_features=False, get_linear_probes=False, freeze_layers=None, get_attention_maps=False):
         *_, h, w, dtype = *img.shape, img.dtype
 
         x = self.to_patch_embedding(img)
         pe = posemb_sincos_2d(x)
         x = rearrange(x, 'b ... d -> b (...) d') + pe
+        if get_attention_maps:
+            x, att_maps = self.transformer(x, get_attention_maps=get_attention_maps)
         if get_features:
             x, features = self.transformer(x, feature_noise=feature_noise, get_features=get_features, freeze_layers=freeze_layers)
         else:
@@ -191,7 +198,10 @@ class SimpleViT_v3(nn.Module):
         x = x.mean(dim = 1)
 
         x = self.to_latent(x)
-        return self.linear_head(x)
+        if get_attention_maps:
+            return self.linear_head(x), att_maps
+        else:
+            return self.linear_head(x)
     def freeze_layers(self, layers_n):
         # freeze all layers prior to layers_n
         for layer in self.transformer.layers[:layers_n]:

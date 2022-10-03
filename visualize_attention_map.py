@@ -35,24 +35,24 @@ fig, axes = plt.subplots(num_images, 2*len(args.model_paths), figsize=(2*4*len(a
 arch = "vit_s_v8"
 for model_i, model_path in enumerate(args.model_paths):
     model = models.get_arch(arch, num_classes=1000)
+    # turn on visualization
+    for layer_i, layer in enumerate(model.transformer.layers):
+        att, ff = layer
+        att.vis = True
+    
     model = ch.nn.DataParallel(model).cuda()
     checkpoint_dict = ch.load(model_path)
     model.load_state_dict(checkpoint_dict['state_dict'])
+    model = model.module
 
     for img_i in range(num_images):
         images = images_all[img_i:img_i+1]
-        # turn on visualization
-        for layer_i, layer in enumerate(model.module.transformer.layers):
-            att, ff = layer
-            att.vis = True
+        pred, att_maps = model(images, get_attention_maps=True)
         
-        pred = model(images)
-
         # loop through each layer
         cum_att = None
-        for layer_i, layer in enumerate(model.module.transformer.layers):
-            att, ff = layer
-            map = att.attmap # shape = (batch size, # head, # patches, # of patches)
+        for layer_i in range(len(model.transformer.layers)):
+            map = att_maps[:, layer_i] # shape = (batch size, # head, # patches, # of patches)
             b_size, head_cnt, p_cnt, _ = map.shape
             avgmap = map.mean(dim=1) # shape = (batch size,  # of patches, # of patches)
             avgmap = avgmap.cpu()
@@ -65,8 +65,9 @@ for model_i, model_path in enumerate(args.model_paths):
                 cum_att = ch.matmul(avgmap, cum_att)
 
         axes[img_i][model_i*2].imshow(images[0].permute(1, 2, 0).cpu()/2+0.5)
-        axes[img_i][model_i*2+1].imshow(cum_att[0].mean(dim=0).reshape(14, 14))
-plt.savefig(f'attention_map.png')
+        axes[img_i][model_i*2+1].imshow(cum_att[0].mean(dim=0).reshape(14, 14).detach())
+os.makedirs('figs', exist_ok = True)
+plt.savefig(f'figs/attention_map.png')
 plt.close()
 
 
