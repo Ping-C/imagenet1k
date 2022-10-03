@@ -56,6 +56,7 @@ class Attention(nn.Module):
         self.norm = nn.LayerNorm(dim)
 
         self.attend = nn.Softmax(dim = -1)
+        self.vis = False
 
         self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = True)
         self.to_out = nn.Linear(inner_dim, dim, bias = True)
@@ -69,6 +70,8 @@ class Attention(nn.Module):
         dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
 
         attn = self.attend(dots)
+        if self.vis:
+            self.attmap = attn.clone().detach()
 
         out = torch.matmul(attn, v)
         out = rearrange(out, 'b h n d -> b n (h d)')
