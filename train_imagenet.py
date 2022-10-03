@@ -143,7 +143,6 @@ Section('training', 'training hyper param stuff').params(
 Section('adv', 'hyper parameter related to adversarial training').params(
     num_steps=Param(int, 'number of adversarial steps'),
     radius_input=Param(float, 'adversarial radius'),
-    radius_schedule=Param(int, 'whether to vary the radius according to a schedule', default=0),
     step_size_input=Param(float, 'step size for adversarial step'),
     adv_features=Param(DictChecker(), 'attacked feature layers'),
     adv_loss_weight=Param(float, 'weight assigned to adversarial loss'),
@@ -1057,7 +1056,6 @@ class ImageNetTrainer:
     @param('adv.cache_class_wise')
     @param('data.num_classes')
     @param('training.mixup')
-    @param('adv.radius_schedule')
     def adv_cache_pyramid(self, images, target, step_size_input=None, radius_input=None, 
     cache_frequency=1, cache_size_multiplier=1, cache_class_wise=False, num_classes=None,
     mixup=None, cache_sequential=False, scale_factors=[32, 16, 1], m_factors=[20, 10, 1], radius_multiplier=1):
