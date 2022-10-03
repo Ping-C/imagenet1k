@@ -15,7 +15,7 @@ export NCCL_SOCKET_IFNAME=ens32
 python -u launch.py --command="python train_imagenet.py --config-file configs/simplevit/vitb_1000cls_randaug2,15.yaml --logging.project_name imgnt1K_simplevitb_fb --logging.resume_id=fb_simplevitb_aal --logging.folder outputs/simplevitb/baseline_(2,15) --dist.world_size=16" &> job_log/run8-1.log &
 
 # vit-s with increasing + decreasing schedule to see whether we can accomodate a larger radius without collapse
-CACHE="--adv.adv_cache=1 --adv.radius_schedule=1 --radius.schedule_type=peak --radius.start_epoch=30 --radius.min_multiplier=0"
+CACHE="--adv.adv_cache=1 --radius.schedule_type=peak --radius.start_epoch=30 --radius.min_multiplier=0"
 
 python -u launch.py --command="python train_imagenet.py --config-file configs/simplevit/vits_1000cls_advpyramid.yaml $CACHE        --adv.radius_input=0.06274509803 --adv.step_size_input=0.0125490196 --logging.project_name imgnt1K_simplevits_fb --logging.resume_id=fb_simplevits_abb    --logging.folder outputs/simplevits/advpyramidcache_r8_peak --dist.world_size=16" &> job_log/run8-3.log &
 
@@ -30,12 +30,12 @@ python -u launch.py --command="python train_imagenet.py --config-file configs/si
 python -u launch.py --command="python train_imagenet.py --config-file configs/simplevit/vits_1000cls_advpyramid.yaml $CACHE        --adv.radius_input=0.06274509803 --adv.step_size_input=0.0125490196 --adv.adv_loss_weight=1 --logging.project_name imgnt1K_simplevits_fb --logging.resume_id=fb_simplevits_abg --logging.folder outputs/simplevits/advpyramidcachenoclean_r8_peak --dist.world_size=16" &> job_log/run8-8.log &
 
 # vit-s increase the training length of universal adversarial training by 2 and 3 times to see whether we can increase performance
-CACHE="--adv.adv_cache=1 --adv.radius_schedule=1 --radius.schedule_type=peak --radius.start_epoch=60 --radius.min_multiplier=0 --training.epochs=600"
+CACHE="--adv.adv_cache=1 --radius.schedule_type=peak --radius.start_epoch=60 --radius.min_multiplier=0 --training.epochs=600"
 python -u launch.py --command="python train_imagenet.py --config-file configs/simplevit/vits_1000cls_advpyramid.yaml $CACHE        --adv.radius_input=0.07843137254 --adv.step_size_input=0.0156862745 --logging.project_name imgnt1K_simplevits_fb --logging.resume_id=fb_simplevits_abh --logging.folder outputs/simplevits/advpyramidcache_r10_e600 --dist.world_size=16" &> job_log/run8-9.log &
-CACHE="--adv.adv_cache=1 --adv.radius_schedule=1 --radius.schedule_type=peak --radius.start_epoch=120 --radius.min_multiplier=0 --training.epochs=1200"
+CACHE="--adv.adv_cache=1 --radius.schedule_type=peak --radius.start_epoch=120 --radius.min_multiplier=0 --training.epochs=1200"
 python -u launch.py --command="python train_imagenet.py --config-file configs/simplevit/vits_1000cls_advpyramid.yaml $CACHE        --adv.radius_input=0.07843137254 --adv.step_size_input=0.0156862745 --logging.project_name imgnt1K_simplevits_fb --logging.resume_id=fb_simplevits_abi --logging.folder outputs/simplevits/advpyramidcache_r10_e600 --dist.world_size=16" &> job_log/run8-10.log &
 
 
 # regularized pyramid with decreasing radius
-SCHEDULE="--adv.radius_schedule=1 --radius.schedule_type=linear_decrease --radius.start_epoch=30 --radius.min_multiplier=0"
+SCHEDULE="--radius.schedule_type=linear_decrease --radius.start_epoch=30 --radius.min_multiplier=0"
 python -u launch.py --command="python train_imagenet.py --config-file configs/simplevit/vits_1000cls_advpyramid.yaml     $SCHEDULE   --adv.radius_input=0.04705882352 --adv.step_size_input=0.0156862745 --logging.project_name imgnt1K_simplevits_fb --logging.resume_id=fb_simplevits_bba --logging.folder outputs/simplevits/advpyramid_r6_s1_c5_decrease --adv.num_steps=5 --dist.world_size=16" &> job_log/run8-11.log &

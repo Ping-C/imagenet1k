@@ -115,11 +115,11 @@ while requeue and requeue_unknown_count < requeue_limit:
     elif any([status == "TIMEOUT" for status in job_statuses]):
         requeue = True
         requeue_known_count += 1
-    elif any(["NODE_ERROR" == status  for status in job_statuses]):
+    elif any([status in ("NODE_ERROR", "NODE_FAILED", "NODE_FAIL")  for status in job_statuses]):
         # if faulty nodes are returned
         requeue = True
         requeue_known_count += 1
-        failed_nodes = [ exception for status, exception in zip(job_statuses, job_exceptions) if status == "NODE_ERROR" ]
+        failed_nodes = [ exception for status, exception in zip(job_statuses, job_exceptions) if status in ("NODE_ERROR", "NODE_FAILED") ]
         excluded_nodes += failed_nodes
     else:
         # try requeuing no more than 3 times, if the error is unclear
