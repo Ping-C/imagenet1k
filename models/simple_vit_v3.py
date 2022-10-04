@@ -6,7 +6,6 @@ from einops.layers.torch import Rearrange
 from torch.nn.init import xavier_uniform_
 import torch.nn as nn
 
-from .simple_vit import Transformer
 # helpers
 
 def pair(t):
@@ -41,7 +40,6 @@ class FeedForward(nn.Module):
     def _reset_parameters(self):
         self.apply(self._init_weights)
     def _init_weights(self, module):
-        print(f"applying xavier uniform for {self} + normal init")
         if isinstance(module, nn.Linear):
             xavier_uniform_(module.weight.data)
             if module.bias is not None:
@@ -75,7 +73,6 @@ class Attention(nn.Module):
         return self.to_out(out), attn
 
     def _reset_parameters(self):
-        print(f"applying xavier uniform for {self} + zero init")
         self.apply(self._init_weights)
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -83,7 +80,7 @@ class Attention(nn.Module):
             if module.bias is not None:
                 nn.init.zeros_(module.bias.data)
 
-class Transformer_v2(nn.Module):
+class Transformer(nn.Module):
     def __init__(self, dim, depth, heads, dim_head, mlp_dim):
         super().__init__()
         self.layers = nn.ModuleList([])
@@ -136,7 +133,7 @@ class SimpleViT_v3(nn.Module):
             nn.Linear(patch_dim, dim),
         )
 
-        self.transformer = Transformer_v2(dim, depth, heads, dim_head, mlp_dim)
+        self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim)
         self.encoder_norm = nn.LayerNorm(dim)
 
         self.to_latent = nn.Sequential(
@@ -146,6 +143,7 @@ class SimpleViT_v3(nn.Module):
         self.linear_head = nn.Sequential(
             nn.Linear(dim, num_classes)
         )
+        self._reset_parameters()
     
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -163,16 +161,14 @@ class SimpleViT_v3(nn.Module):
         self.to_latent[0].apply(self._linear_init)
         self.linear_head[0].apply(self._linear_init)
         self.to_patch_embedding[1].apply(self._linear_init)
+
         # reset attention
         # reset mlp blocks
         for module in self.modules():
             if isinstance(module, FeedForward) or isinstance(module, Attention):
                 module._reset_parameters()
-    def _reset_parameters_v2(self):
-        self._reset_parameters()
+        
         nn.init.zeros_(self.linear_head[0].weight.data)
-    def _reset_parameters_v3(self):
-        self._reset_parameters_v2()
         for module in self.modules():
             if isinstance(module, Attention):
                 fan_in = module.to_qkv.weight.shape[0]

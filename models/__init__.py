@@ -37,8 +37,8 @@ class BatchNormDecoupled(nn.Module):
         self.factor = factor
 
 def get_arch(arch_name, num_classes, probe=False, split_layer=None):
-    if arch_name == 'vit_t':
-        return SimpleViT(
+    if arch_name in ('vit_t', 'vit_t_v2','vit_t_v3','vit_t_v4','vit_t_v5','vit_t_v6','vit_t_v7','vit_t_v8'):
+        return SimpleViT_v3(
             image_size = 256,
             patch_size = 32,
             num_classes = num_classes,
@@ -48,77 +48,7 @@ def get_arch(arch_name, num_classes, probe=False, split_layer=None):
             mlp_dim = 2048,
             probe=probe
         )
-    elif arch_name == 'vit_s':
-        return SimpleViT(
-            image_size = 224,
-            patch_size = 16,
-            num_classes = num_classes,
-            dim = 384,
-            depth = 12,
-            heads = 6,
-            mlp_dim = 768,
-            probe=probe
-        )
-    elif arch_name == 'vit_s_v2':
-        return SimpleViT_v2(
-            image_size = 224,
-            patch_size = 16,
-            num_classes = num_classes,
-            dim = 384,
-            depth = 12,
-            heads = 6,
-            mlp_dim = 768
-        )
-    elif arch_name == 'vit_s_v3':
-        model = SimpleViT_v2(
-            image_size = 224,
-            patch_size = 16,
-            num_classes = num_classes,
-            dim = 384,
-            depth = 12,
-            heads = 6,
-            mlp_dim = 768
-        )
-        model.transformer.apply(model._init_weights)
-        return model
-    elif arch_name == 'vit_s_v4':
-        model = SimpleViT_v2(
-            image_size = 224,
-            patch_size = 16,
-            num_classes = num_classes,
-            dim = 384,
-            depth = 12,
-            heads = 6,
-            mlp_dim = 768
-        )
-        model._reset_parameters()
-        return model
-    
-    elif arch_name == 'vit_s_v5':
-        model = SimpleViT_v2(
-            image_size = 224,
-            patch_size = 16,
-            num_classes = num_classes,
-            dim = 384,
-            depth = 12,
-            heads = 6,
-            mlp_dim = 384*4
-        )
-        model._reset_parameters()
-        return model
-    elif arch_name == 'vit_s_v6':
-        model = SimpleViT_v2(
-            image_size = 224,
-            patch_size = 16,
-            num_classes = num_classes,
-            dim = 384,
-            depth = 12,
-            heads = 6,
-            mlp_dim = 384*4
-        )
-        model._reset_parameters_v2()
-        return model
-    elif arch_name == 'vit_s_v7':
+    elif arch_name in ('vit_s', 'vit_s_v2','vit_s_v3','vit_s_v4','vit_s_v5','vit_s_v6','vit_s_v7','vit_s_v8'):
         model = SimpleViT_v3(
             image_size = 224,
             patch_size = 16,
@@ -128,22 +58,8 @@ def get_arch(arch_name, num_classes, probe=False, split_layer=None):
             heads = 6,
             mlp_dim = 384*4
         )
-        model._reset_parameters_v2()
-        return model
-    elif arch_name == 'vit_s_v8':
-        model = SimpleViT_v3(
-            image_size = 224,
-            patch_size = 16,
-            num_classes = num_classes,
-            dim = 384,
-            depth = 12,
-            heads = 6,
-            mlp_dim = 384*4
-        )
-        model._reset_parameters_v3()
-        return model
-    elif arch_name == 'vit_b_v5':
-        model = SimpleViT_v2(
+    elif arch_name in ('vit_b', 'vit_b_v2','vit_b_v3','vit_b_v4','vit_b_v5','vit_b_v6','vit_b_v7','vit_b_v8'):
+        odel = SimpleViT_v3(
             image_size = 224,
             patch_size = 16,
             num_classes = num_classes,
@@ -153,31 +69,6 @@ def get_arch(arch_name, num_classes, probe=False, split_layer=None):
             mlp_dim = 768*4
         )
         model._reset_parameters()
-        return model
-    elif arch_name == 'vit_b_v7':
-        model = SimpleViT_v3(
-            image_size = 224,
-            patch_size = 16,
-            num_classes = num_classes,
-            dim = 768,
-            depth = 12,
-            heads = 12,
-            mlp_dim = 768*4
-        )
-        model._reset_parameters_v2()
-        return model
-    
-    elif arch_name == 'vit_b_v8':
-        model = SimpleViT_v3(
-            image_size = 224,
-            patch_size = 16,
-            num_classes = num_classes,
-            dim = 768,
-            depth = 12,
-            heads = 12,
-            mlp_dim = 768*4
-        )
-        model._reset_parameters_v3()
         return model
     elif arch_name == 'vit_s_twohead':
         return SimpleViTTwoHead(
@@ -251,7 +142,7 @@ def get_arch(arch_name, num_classes, probe=False, split_layer=None):
             probe=probe
         )
     elif arch_name == 'vit_m':
-        return SimpleViT(
+        return SimpleViT_v3(
             image_size = 224,
             patch_size = 16,
             num_classes = num_classes,
@@ -259,17 +150,6 @@ def get_arch(arch_name, num_classes, probe=False, split_layer=None):
             depth = 12,
             heads = 8,
             mlp_dim = 2048,
-            probe=probe
-        )
-    elif arch_name == 'vit_b':
-        return SimpleViT(
-            image_size = 224,
-            patch_size = 16,
-            num_classes = num_classes,
-            dim = 768,
-            depth = 12,
-            heads = 12,
-            mlp_dim = 3072,
             probe=probe
         )
     elif arch_name == 'regvit_b':
