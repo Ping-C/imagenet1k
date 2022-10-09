@@ -72,6 +72,7 @@ def getnodefromtask(task):
         if "I'm on node #" in line:
             nodename = line.replace("    I'm on node #", "")
             return nodename
+    return ""
 class SlurmExecutorMod(submitit.SlurmExecutor):
     def _num_tasks(self) -> int:
         additional_para = self.parameters.get("additional_parameters", None)
@@ -81,7 +82,7 @@ class SlurmExecutorMod(submitit.SlurmExecutor):
             nodes: int = self.parameters.get("nodes", 1)
             tasks_per_node: int = max(1, self.parameters.get("ntasks_per_node", 1))
             return nodes * tasks_per_node
-    return ""
+    
 executor = SlurmExecutorMod(folder=args.log_folder)
 
 world_size = int([val for val in args.command.split() if '--dist.world_size=' in val][0].split('=')[1])
