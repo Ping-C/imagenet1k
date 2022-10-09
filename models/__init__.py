@@ -49,7 +49,7 @@ def get_arch(arch_name, num_classes, probe=False, split_layer=None):
             probe=probe
         )
     elif arch_name in ('vit_s', 'vit_s_v2','vit_s_v3','vit_s_v4','vit_s_v5','vit_s_v6','vit_s_v7','vit_s_v8'):
-        model = SimpleViT_v3(
+        return SimpleViT_v3(
             image_size = 224,
             patch_size = 16,
             num_classes = num_classes,
@@ -59,7 +59,7 @@ def get_arch(arch_name, num_classes, probe=False, split_layer=None):
             mlp_dim = 384*4
         )
     elif arch_name in ('vit_b', 'vit_b_v2','vit_b_v3','vit_b_v4','vit_b_v5','vit_b_v6','vit_b_v7','vit_b_v8'):
-        odel = SimpleViT_v3(
+        return SimpleViT_v3(
             image_size = 224,
             patch_size = 16,
             num_classes = num_classes,
@@ -68,8 +68,6 @@ def get_arch(arch_name, num_classes, probe=False, split_layer=None):
             heads = 12,
             mlp_dim = 768*4
         )
-        model._reset_parameters()
-        return model
     elif arch_name == 'vit_s_twohead':
         return SimpleViTTwoHead(
             image_size = 224,

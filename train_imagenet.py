@@ -155,6 +155,10 @@ Section('adv', 'hyper parameter related to adversarial training').params(
     cache_size_multiplier=Param(float, 'how large is the cached noise relative to the batch size', default=1),
     cache_sequential=Param(float, 'whether to update the cache sequentially or randomly when cache_size_multiplier is larger than 1', default=0),
     cache_class_wise=Param(float, 'whether to use class wise universal perturbation', default=0),
+    cache_class_wise_targeted=Param(float, 'whether to use class wise universal perturbation', default=0),
+    cache_class_wise_targeted_loss=Param(
+        str, 
+        'different types of targeted loss: negative_ce, reverse_ce, negative_two_logit_ce, reverse_two_logit_ce', default=None),
     cache_class_wise_shuffle_iter=Param(int, 'number of iterations to shuffle class wise adversaries'),
     pyramid=Param(float, 'whether to use pyramid adversary', default=0),
     optimizer=Param(str, 'optimizer used to optimizer the image'),
@@ -959,6 +963,7 @@ class ImageNetTrainer:
     @param('adv.cache_size_multiplier')
     @param('adv.cache_sequential')
     @param('adv.cache_class_wise')
+    @param('adv.cache_class_wise_targeted')
     @param('adv.pyramid')
     @param('data.num_classes')
     @param('training.mixup')
@@ -967,10 +972,13 @@ class ImageNetTrainer:
     @param('adv.cache_class_wise_shuffle_iter')
     def adv_cache(self, images, target, step_size_input=None, radius_input=None, 
     cache_frequency=1, cache_size_multiplier=1, cache_class_wise=False, num_classes=None,
-    mixup=None, cache_sequential=False, pyramid=0, optimizer='pgd', lr=None, beta=0.9, radius_multiplier=1, cache_class_wise_shuffle_iter=float('inf')):
+    mixup=None, cache_sequential=False, pyramid=0, optimizer='pgd', lr=None, beta=0.9, radius_multiplier=1, cache_class_wise_shuffle_iter=float('inf'), cache_class_wise_targeted=False):
         if pyramid:
-            return self.adv_cache_pyramid(images, target, radius_multiplier=radius_multiplier)
-        
+            if cache_class_wise_targeted:
+                return self.adv_cache_pyramid_classwise_targeted(images, target, radius_multiplier=radius_multiplier)
+            else:
+                return self.adv_cache_pyramid(images, target, radius_multiplier=radius_multiplier)
+            
         if cache_class_wise:
             if not hasattr(self, 'adv_cache_noise'):
                 self.adv_cache_noise = ch.zeros((int(num_classes), *images.shape[1:]), device=images.device, dtype=images.dtype)
@@ -1101,6 +1109,41 @@ class ImageNetTrainer:
         elif cache_size_multiplier < 1:
             return pyramid_noise.repeat(int(1/cache_size_multiplier), 1, 1, 1), FeatureNoise({})
 
+    @param('adv.radius_input')
+    @param('adv.step_size_input')
+    @param('data.num_classes')
+    @param('adv.cache_size_multiplier')
+    def adv_cache_pyramid_classwise_targeted(self, images, target, step_size_input=None, radius_input=None, num_classes=None, scale_factors=[32, 16, 1], m_factors=[20, 10, 1], radius_multiplier=1, cache_size_multiplier=1):
+        b_size = images.shape[0]
+
+        if not hasattr(self, 'adv_cache_noise_pyramid'):
+            self.adv_cache_noise_pyramid = []
+            for scale_factor in scale_factors:
+                noise = ch.zeros((int(num_classes*cache_size_multiplier), images.shape[1], *(ch.tensor(images.shape[2:])//scale_factor)), device=images.device, dtype=images.dtype)
+                noise.requires_grad_(True)
+                self.adv_cache_noise_pyramid.append(noise)
+            self.adv_cache_iter = 0
+        else:
+            self.adv_cache_iter += 1
+            # take an adversarial step
+            for adv_cache_noise in self.adv_cache_noise_pyramid:
+                grad = adv_cache_noise.grad
+                adv_cache_noise.data += grad.sign() * step_size_input
+                adv_cache_noise.data.clamp_(-radius_input*radius_multiplier, +radius_input*radius_multiplier)
+            for adv_cache_noise in self.adv_cache_noise_pyramid:
+                adv_cache_noise.grad = None
+        
+        
+        pyramid_noise = None
+        for noise, m_factor in zip(self.adv_cache_noise_pyramid,  m_factors):
+            if pyramid_noise is None:
+                pyramid_noise = ch.nn.functional.upsample(noise, images.shape[2:])*m_factor
+            else:
+                pyramid_noise += ch.nn.functional.upsample(noise, images.shape[2:])*m_factor
+        
+        target_labels = ch.randint(num_classes, size=(len(images),), device=images.device)
+        pyramid_noise = pyramid_noise[target_labels+int(self.adv_cache_iter%cache_size_multiplier)*num_classes]
+        return (pyramid_noise, target_labels), FeatureNoise({})
 
     @param('adv.num_steps')
     @param('adv.radius_input')
@@ -1227,8 +1270,11 @@ class ImageNetTrainer:
     @param('training.weight_decay_explicit')
     @param('training.weight_decay')
     @param('training.weight_decay_nolr')
+    @param('adv.cache_class_wise_targeted')
+    @param('adv.cache_class_wise_targeted_loss')
     def train_loop(self, epoch, log_level, grad_clip_norm=None, num_steps=0, adv_loss_weight=0, radius=0, fixed_dropout=False, freeze_layers=None, split_backward=False, 
-    freeze_nonlayernorm=False, adv_loss_even=False, mixed_precision=True, torch_loader=0, mixup=0, weight_decay_explicit=0, weight_decay=0, weight_decay_nolr=0): 
+    freeze_nonlayernorm=False, adv_loss_even=False, mixed_precision=True, torch_loader=0, mixup=0, weight_decay_explicit=0, weight_decay=0, weight_decay_nolr=0, cache_class_wise_targeted=0,
+                  cache_class_wise_targeted_loss=None): 
         model = self.model
         model.train()
         losses = []
@@ -1258,6 +1304,8 @@ class ImageNetTrainer:
                 if hasattr(self.model.module, 'make_adv'):
                     self.model.module.make_adv()
                 images_adv, features_adv = self.adv_step(self.model, images, target, radius_multiplier=get_radius_multiplier(epoch = epoch))
+                if cache_class_wise_targeted:
+                    images_adv, target_adv = images_adv
             if fixed_dropout:
                 fixed_seed = ch.randint(0, 999999, size=(1,), device=images.device)
             with autocast(enabled=bool(mixed_precision)):
@@ -1320,7 +1368,47 @@ class ImageNetTrainer:
                                 "adv_img": adv_img},
                                 commit=False
                                 )
-                    loss_train_adv = self.train_adv_loss_func(output_adv, target)
+                    if cache_class_wise_targeted:
+                        if cache_class_wise_targeted_loss == 'negative_ce':
+                            loss_train_adv = -ch.nn.CrossEntropyLoss()(output_adv, target_adv)
+                        elif cache_class_wise_targeted_loss == 'reverse_ce':
+                            target_adv = ch.nn.functional.one_hot(target_adv, num_classes=1000) # change it into onehot
+                            target_adv = ch.ones_like(target_adv) - target_adv
+                            loss_train_adv = ch.nn.CrossEntropyLoss()(output_adv, target_adv.float())
+                        elif cache_class_wise_targeted_loss == 'negative_twologits_ce':
+                            true_logit = output_adv.gather(target, dim=1)
+                            adv_logit = output_adv.gather(target_adv, dim=1)
+                            two_logits = ch.cat((true_logit, adv_logit), dim=1)
+                            loss_train_adv = -ch.nn.CrossEntropyLoss()(
+                                two_logits, 
+                                labels=torch.ones_like(true_logit)
+                            )
+                        elif cache_class_wise_targeted_loss == 'reverse_twologits_ce':
+                            if mixup:
+                                true_logit = output_adv.gather(dim=1, index=target[:, 0:2].long())
+                                adv_logit = output_adv.gather(dim=1, index=target_adv[:, None])
+                                two_logits = ch.cat((true_logit, adv_logit), dim=1)
+                                true_label_1 = ch.ones_like(adv_logit)*target[0, 2]
+                                true_label_2 = ch.ones_like(adv_logit)*(1-target[0, 2])
+                                adv_label = ch.zeros_like(adv_logit)
+                                two_logits_label = ch.cat((true_label_1, true_label_2, adv_label), dim=1).float()
+                                loss_train_adv = ch.nn.CrossEntropyLoss()(
+                                    two_logits, 
+                                    two_logits_label 
+                                )
+                            else:
+                                true_logit = output_adv.gather(dim=1, index=target[:, None].long())
+                                adv_logit = output_adv.gather(dim=1, index=target_adv[:, None])
+                                two_logits = ch.cat((true_logit, adv_logit), dim=1)
+                                true_label = ch.ones_like(adv_logit)
+                                adv_label = ch.zeros_like(adv_logit)
+                                two_logits_label = ch.cat((true_label, adv_label), dim=1).float()
+                                loss_train_adv = ch.nn.CrossEntropyLoss()(
+                                    two_logits, 
+                                    two_logits_label 
+                                )
+                    else:
+                        loss_train_adv = self.train_adv_loss_func(output_adv, target)
                     dummy_loss = sum([para.sum()*0 for para in model.parameters()])
                     if split_backward:
                         if adv_loss_even:
