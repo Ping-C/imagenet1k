@@ -482,6 +482,8 @@ class ImageNetTrainer:
             self.usewb = False
         if adv_augment_on:
             self.prepare_adversarial_augment()
+        class_idx = json.load(open('imagenet_class_index.json'))
+        self.idx2label = [class_idx[str(k)][1] for k in range(len(class_idx))]
     
     @param('adv_augment.radius')
     @param('adv_augment.step_size')
@@ -866,18 +868,14 @@ class ImageNetTrainer:
                 pass
             if freeze_nonlayernorm_epochs is not None:
                 if epoch < freeze_nonlayernorm_epochs:
-                    train_loss, train_loss_adv = self.train_loop(epoch, freeze_nonlayernorm=True)
+                    train_stats = self.train_loop(epoch, freeze_nonlayernorm=True)
                 else:
-                    train_loss, train_loss_adv = self.train_loop(epoch, freeze_nonlayernorm=False)
+                    train_stats = self.train_loop(epoch, freeze_nonlayernorm=False)
             else:
-                train_loss, train_loss_adv = self.train_loop(epoch)
+                train_stats = self.train_loop(epoch)
 
             if log_level > 0:
-                extra_dict = {
-                    'train_loss': train_loss,
-                    'train_loss_adv': train_loss_adv,
-                    'epoch': epoch
-                }
+                extra_dict = train_stats
 
                 self.eval_and_log(extra_dict)
             if self.rank == 0 and (epoch+1) % save_checkpoint_interval == 0:
@@ -1279,6 +1277,8 @@ class ImageNetTrainer:
         model.train()
         losses = []
         losses_adv = []
+        train_stats = defaultdict(lambda : 0)
+        n_samples = 0
         adv = num_steps > 0
         sam = radius > 0
 
@@ -1292,7 +1292,7 @@ class ImageNetTrainer:
                 images, target = images.cuda(non_blocking=True), target.cuda(non_blocking=True)
                 if mixup:
                     images, target = mixup_data(images, target, 0.2, True)
-                    
+            n_samples += len(images)
             ### Training start
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = lrs[ix]
@@ -1372,9 +1372,9 @@ class ImageNetTrainer:
                         if cache_class_wise_targeted_loss == 'negative_ce':
                             loss_train_adv = -ch.nn.CrossEntropyLoss()(output_adv, target_adv)
                         elif cache_class_wise_targeted_loss == 'reverse_ce':
-                            target_adv = ch.nn.functional.one_hot(target_adv, num_classes=1000) # change it into onehot
-                            target_adv = ch.ones_like(target_adv) - target_adv
-                            loss_train_adv = ch.nn.CrossEntropyLoss()(output_adv, target_adv.float())
+                            target_adv_onehot = ch.nn.functional.one_hot(target_adv, num_classes=1000) # change it into onehot
+                            target_adv_onehot = ch.ones_like(target_adv) - target_adv_onehot
+                            loss_train_adv = ch.nn.CrossEntropyLoss()(output_adv, target_adv_onehot.float())
                         elif cache_class_wise_targeted_loss == 'negative_twologits_ce':
                             true_logit = output_adv.gather(target, dim=1)
                             adv_logit = output_adv.gather(target_adv, dim=1)
@@ -1396,6 +1396,7 @@ class ImageNetTrainer:
                                     two_logits, 
                                     two_logits_label 
                                 )
+                                pred_labels = two_logits.max(dim=1).indices                                
                             else:
                                 true_logit = output_adv.gather(dim=1, index=target[:, None].long())
                                 adv_logit = output_adv.gather(dim=1, index=target_adv[:, None])
@@ -1409,6 +1410,8 @@ class ImageNetTrainer:
                                 )
                     else:
                         loss_train_adv = self.train_adv_loss_func(output_adv, target)
+                    
+                    
                     dummy_loss = sum([para.sum()*0 for para in model.parameters()])
                     if split_backward:
                         if adv_loss_even:
@@ -1420,6 +1423,22 @@ class ImageNetTrainer:
                             loss_train = loss_train_adv + loss_train + dummy_loss
                         else:
                             loss_train = loss_train_adv * adv_loss_weight + loss_train * (1-adv_loss_weight) + dummy_loss
+                    
+                    # calculate adversarial metric
+                    # needs to calculate this separately for mix up training
+                    if self.rank == 0:
+                        pred_adv = output_adv.max(dim=1).indices
+                        if mixup:
+                            train_stats['adv_err_rate'] += ((pred_adv != target[:, 0]) & (pred_adv != target[:, 1])).sum().cpu().detach().item()
+                            train_stats['adv_err0_rate'] += ((pred_adv != target[:, 0])).sum().cpu().detach().item()
+                            train_stats['adv_err1_rate'] += ((pred_adv != target[:, 1])).sum().cpu().detach().item()
+                            train_stats['adv_distribution'] += ch.nn.functional.one_hot(pred_adv[(pred_adv != target[:, 0]) & (pred_adv != target[:, 1])], num_classes=1000).sum(dim=0).cpu().detach()
+                        else:
+                            train_stats['adv_err_rate'] += (pred_adv != target).sum().cpu().detach().item()
+                            train_stats['adv_distribution'] += ch.nn.functional.one_hot(pred_adv[(pred_adv != target)], num_classes=1000).sum(dim=0).cpu().detach()
+                        if cache_class_wise_targeted:
+                            train_stats['tgt_success_rate'] += (pred_adv == target_adv).sum().cpu().detach().item()
+
                 else:
                     loss_train_adv= ch.tensor(0)
             if not split_backward:
@@ -1474,7 +1493,27 @@ class ImageNetTrainer:
                 msg = ', '.join(f'{n}={v}' for n, v in zip(names, values))
                 iterator.set_description(msg)
             ### Logging end
-        return (sum(losses)/len(losses)).item(), (sum(losses_adv)/len(losses_adv)).item()
+       
+        for k in train_stats:
+            if "rate" in k:
+                train_stats[k]/= n_samples
+        if "adv_distribution" in train_stats and self.rank == 0:
+            train_stats["adv_distribution"] = train_stats["adv_distribution"].float()/train_stats["adv_distribution"].sum()
+            train_stats['worst_class_rate'] = train_stats["adv_distribution"].max().cpu().detach().item()
+            
+            data = [[self.idx2label[label], val] for (label, val) in zip(ch.arange(1000), train_stats["adv_distribution"])]
+            data = sorted(data, key = lambda x: x[1], reverse=True)
+            data = data[:20]
+            table = wandb.Table(data=data, columns = ["label", "frequency"])
+            plot = wandb.plot.bar(table, "label",
+                                           "frequency", title="loss distribution")
+            train_stats["adv_distribution"] = plot
+            
+
+        train_stats["train_loss"] = (sum(losses)/len(losses)).item()
+        train_stats["train_loss_adv"] = (sum(losses_adv)/len(losses_adv)).item()
+        train_stats["epoch"] = epoch
+        return train_stats
 
 
     @param('validation.lr_tta')
@@ -1598,7 +1637,6 @@ class ImageNetTrainer:
                 '.'.join(k): self.all_params[k] for k in self.all_params.entries.keys()
             }
             params['logging.resume_id'] = str(self.uid)
-
             with open(folder / 'params.json', 'w+') as handle:
                 json.dump(params, handle)
 
@@ -1611,6 +1649,8 @@ class ImageNetTrainer:
             log_filename = 'log_eval'
         else:
             log_filename = 'log'
+        if "adv_distribution" in content:
+            del content["adv_distribution"]
         with open(self.log_folder / log_filename, 'a+') as fd:
             fd.write(json.dumps({
                 'timestamp': cur_time,
