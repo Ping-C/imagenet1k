@@ -136,7 +136,7 @@ while requeue and requeue_unknown_count < requeue_limit:
             # cancel jobs
             
         print(f"job {job.job_id} states: ", [task.state for task in tasks])
-        if all([task.state == 'COMPLETED' or task.state == 'FAILED' or task.state == 'TIMEOUT' for task in tasks]):
+        if all([task.state == 'COMPLETED' or task.state == 'FAILED' or task.state == 'NODE_FAIL' or task.state == 'TIMEOUT' for task in tasks]):
             break
             # start analyzing the results only if all of the tasks have either failed, completed or timeout
         if any(["CANCELLED" in task.state for task in tasks]):
