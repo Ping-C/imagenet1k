@@ -46,6 +46,7 @@ def readlogfiles(job):
     # read log files if they exists
     # loop through all log files, and make sure that the error logs
     NCCL_ERR_MSG = "ncclSystemError: System call (socket, malloc, munmap, etc) failed."
+    UNEXPECTED_ERR_MSG = "Encountering unexpected failure:"
     statuses = [None]*len(job._tasks)
     for i, task_num in enumerate(job._tasks):
         # check whether the error log exists
@@ -57,7 +58,7 @@ def readlogfiles(job):
             f.close()
             
             for line in lines:
-                if NCCL_ERR_MSG in line:
+                if NCCL_ERR_MSG in line or UNEXPECTED_ERR_MSG in line:
                     statuses[i] = "NCCL_ERR"
                     break
                 if "iter=1" in line:
@@ -169,6 +170,9 @@ while requeue and requeue_unknown_count < requeue_limit:
             else:
                 job_statuses.append("CANCELLED")
                 job_exceptions.append(getnodefromtask(task))
+        elif "NODE_FAIL" == task.state:
+            job_statuses.append("NODE_ERROR")
+            job_exceptions.append(getnodefromtask(task))
         else:
             raise ValueError(f"Unknown state {task.state}")
     print(f"job statuses: {job_statuses}")
