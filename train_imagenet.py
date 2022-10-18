@@ -161,6 +161,10 @@ Section('adv', 'hyper parameter related to adversarial training').params(
         'different types of targeted loss: negative_ce, reverse_ce, negative_two_logit_ce, reverse_two_logit_ce', default=None),
     cache_class_wise_shuffle_iter=Param(int, 'number of iterations to shuffle class wise adversaries'),
     pyramid=Param(float, 'whether to use pyramid adversary', default=0),
+    generator=Param(float, 'whether to use generator adversary', default=0),
+    generator_arch=Param(str, 'generator architecture, such as vit_s_generator_flat, vit_s_generator_deep, vit_s_generator_deepflat', default='vit_s_generator'),
+    generator_universal=Param(float, 'whether to use generator with randomized noised input', default=0),
+    generator_grad_mult=Param(float, 'multiplier for generator gradient', default=1),
     optimizer=Param(str, 'optimizer used to optimizer the image'),
     lr=Param(float, 'optimizer used to optimizer the image'),
 )
@@ -465,6 +469,8 @@ class ImageNetTrainer:
                         checkpoint_dict = self.convert(checkpoint_dict)
                     self.starting_epoch = 0
                     self.model.load_state_dict(checkpoint_dict)
+                if 'generator_state_dict' in checkpoint_dict:
+                    self.generator.load_state_dict(checkpoint_dict['generator_state_dict'])
             else:
                 print(f"Failed to find checkpoint in {self.log_folder}. Starting a new run")
                 self.starting_epoch = 0
@@ -567,6 +573,8 @@ class ImageNetTrainer:
 
             # Only do weight decay on non-batchnorm parameters
             all_params = list(self.model.named_parameters())
+            if hasattr(self, 'generator'):
+                all_params += list(self.generator.named_parameters())
             bn_params = [v for k, v in all_params if ('bn' in k)]
             other_params = [v for k, v in all_params if not ('bn' in k)]
             param_groups = [{
@@ -581,6 +589,8 @@ class ImageNetTrainer:
         elif optimizer == 'adam':
              # Only do weight decay on non-layernorm parameters and non bias parameters
             all_params = list(self.model.named_parameters())
+            if hasattr(self, 'generator'):
+                all_params += list(self.generator.named_parameters())
             norm_params = []
             bias_params = []
             other_params = []
@@ -602,6 +612,8 @@ class ImageNetTrainer:
             self.optimizer = ch.optim.Adam(param_groups, lr=1)
         elif optimizer == 'adamw':
             all_params = list(self.model.named_parameters())
+            if hasattr(self, 'generator'):
+                all_params += list(self.generator.named_parameters())
             norm_params = []
             bias_params = []
             other_params = []
@@ -895,6 +907,8 @@ class ImageNetTrainer:
                     'optimizer': self.optimizer.state_dict(),
                     'args': {'.'.join(k): self.all_params[k] for k in self.all_params.entries.keys()}
                 }
+                if hasattr(self, 'generator'):
+                    checkpoint_dict['generator_state_dict'] = self.generator.state_dict()
                 ch.save(checkpoint_dict, self.log_folder / f'epoch{epoch}.pt')
                 
         self.eval_and_log({'epoch':epoch})
@@ -905,6 +919,8 @@ class ImageNetTrainer:
                     'optimizer': self.optimizer.state_dict(),
                     'args': {'.'.join(k): self.all_params[k] for k in self.all_params.entries.keys()}
                 }
+            if hasattr(self, 'generator'):
+                checkpoint_dict['generator_state_dict'] = self.generator.state_dict()
             ch.save(checkpoint_dict, self.log_folder / f'final_weights.pt')
 
     def eval_and_log(self, extra_dict={}):
@@ -945,7 +961,9 @@ class ImageNetTrainer:
     @param('training.distributed')
     @param('training.use_blurpool')
     @param('data.num_classes')
-    def create_model_and_scaler(self, arch, pretrained, distributed, use_blurpool, num_classes):
+    @param('adv.generator')
+    @param('adv.generator_arch')
+    def create_model_and_scaler(self, arch, pretrained, distributed, use_blurpool, num_classes, generator=False, generator_arch=None):
         scaler = GradScaler()
         model = models.get_arch(arch, num_classes=num_classes)
         def apply_blurpool(mod: ch.nn.Module):
@@ -957,11 +975,24 @@ class ImageNetTrainer:
 
         model = model.to(memory_format=ch.channels_last)
         model = model.to(self.gpu)
-
+           
         if distributed:
             model = ch.nn.parallel.DistributedDataParallel(model, device_ids=[self.gpu])
         else:
             model = ch.nn.DataParallel(model).cuda()
+        
+        if generator:
+            generator = models.get_arch("vit_s_generator")
+            generator = generator.to(memory_format=ch.channels_last)
+            generator = generator.to(self.gpu)
+
+            if distributed:
+                generator = ch.nn.parallel.DistributedDataParallel(generator, device_ids=[self.gpu])
+            else:
+                generator = ch.nn.DataParallel(generator).cuda()
+            self.generator = generator
+
+
         return model, scaler
     
 
@@ -1175,7 +1206,17 @@ class ImageNetTrainer:
         target_labels = ch.randint(num_classes, size=(len(images),), device=images.device)
         pyramid_noise = pyramid_noise[target_labels+int(self.adv_cache_iter%cache_size_multiplier)*num_classes]
         return (pyramid_noise, target_labels), FeatureNoise({})
-
+    
+    @param('adv.radius_input')
+    @param('adv.generator_universal')
+    def adv_generator(self, images, target, radius_input, radius_multiplier, generator_universal=False):
+        if generator_universal:
+            noise = self.generator(ch.randn_like(images))
+        else:
+            noise = self.generator(images)
+        images_adv = (noise-0.5)* 2 * radius_input* radius_multiplier
+        return images_adv, FeatureNoise({})
+        
     @param('adv.num_steps')
     @param('adv.radius_input')
     @param('adv.step_size_input')
@@ -1185,8 +1226,11 @@ class ImageNetTrainer:
     @param('adv.lr')
     @param('adv.pyramid')
     @param('training.mixed_precision')
+    @param('adv.generator')
     def adv_step(self, model, images, target,
-        num_steps=None, step_size_input=None, radius_input=None, adv_features=None, aux_branch=False, adv_cache=False, optimizer='pgd', lr=None, beta=0.9, mixed_precision=True, pyramid=False, radius_multiplier=1):
+        num_steps=None, step_size_input=None, radius_input=None, adv_features=None, aux_branch=False, adv_cache=False, optimizer='pgd', lr=None, beta=0.9, mixed_precision=True, pyramid=False, radius_multiplier=1, generator=False):
+        if generator:
+            return self.adv_generator(images, target, radius_multiplier=radius_multiplier)
         if adv_cache:
             return self.adv_cache(images, target, radius_multiplier=radius_multiplier)
         if pyramid:
@@ -1303,9 +1347,10 @@ class ImageNetTrainer:
     @param('training.weight_decay_nolr')
     @param('adv.cache_class_wise_targeted')
     @param('adv.cache_class_wise_targeted_loss')
+    @param('adv.generator_grad_mult')
     def train_loop(self, epoch, log_level, grad_clip_norm=None, num_steps=0, adv_loss_weight=0, radius=0, fixed_dropout=False, freeze_layers=None, split_backward=False, 
     freeze_nonlayernorm=False, adv_loss_even=False, mixed_precision=True, torch_loader=0, mixup=0, weight_decay_explicit=0, weight_decay=0, weight_decay_nolr=0, cache_class_wise_targeted=0,
-                  cache_class_wise_targeted_loss=None): 
+                  cache_class_wise_targeted_loss=None, generator_grad_mult=1): 
         model = self.model
         model.train()
         losses = []
@@ -1319,7 +1364,7 @@ class ImageNetTrainer:
         iters = self.train_loader.__len__()
         lrs = np.interp(np.arange(iters), [0, iters], [lr_start, lr_end])
 
-        iterator = tqdm(self.train_loader, total=iters)
+        iterator = tqdm(self.train_loader, total=iters, disable=True)
         for ix, (images, target) in enumerate(iterator):
             if torch_loader:
                 images, target = images.cuda(non_blocking=True), target.cuda(non_blocking=True)
@@ -1337,6 +1382,7 @@ class ImageNetTrainer:
                 if hasattr(self.model.module, 'make_adv'):
                     self.model.module.make_adv()
                 images_adv, features_adv = self.adv_step(self.model, images, target, radius_multiplier=get_radius_multiplier(epoch = epoch))
+                
                 if len(images_adv) == 2:
                     images_adv, target_adv = images_adv
                 else:
@@ -1458,6 +1504,8 @@ class ImageNetTrainer:
                             self.scaler.scale(loss_train_adv+dummy_loss).backward()
                         else:
                             self.scaler.scale(loss_train_adv*(adv_loss_weight)+dummy_loss).backward()
+                        if hasattr(self, 'generator'):
+                            self.generator.module.flip_grad(factor=generator_grad_mult)
                     else:
                         if adv_loss_even:
                             loss_train = loss_train_adv + loss_train + dummy_loss
@@ -1488,6 +1536,8 @@ class ImageNetTrainer:
                     loss_train_adv= ch.tensor(0)
             if not split_backward:
                 self.scaler.scale(loss_train).backward()
+                if hasattr(self, 'generator'):
+                    self.generator.module.flip_grad(factor=generator_grad_mult)
             # Unscales the gradients of optimizer's assigned params in-place
             self.scaler.unscale_(self.optimizer)
             if hasattr(self, 'adv_cache_noise'):
@@ -1580,7 +1630,7 @@ class ImageNetTrainer:
                     
                     with ch.no_grad():
                         with autocast(enabled=bool(mixed_precision)):
-                            for images, target in tqdm(self.val_loader):
+                            for images, target in tqdm(self.val_loader, disable=True):
                                 output = self.model(images)
                                 if lr_tta:
                                     output += self.model(ch.flip(images, dims=[3]))
@@ -1608,7 +1658,7 @@ class ImageNetTrainer:
                     
                     with ch.no_grad():
                         with autocast(enabled=bool(mixed_precision)):
-                            for images, target in tqdm(self.val_loader):
+                            for images, target in tqdm(self.val_loader, disable=True):
                                 output = self.model(images)
                                 if lr_tta:
                                     output += self.model(ch.flip(images, dims=[3]))
@@ -1630,7 +1680,7 @@ class ImageNetTrainer:
 
             with ch.no_grad():
                 with autocast(enabled=bool(mixed_precision)):
-                    for images, target in tqdm(self.val_loader):
+                    for images, target in tqdm(self.val_loader, disable=True):
                         output = self.model(images)
                         if lr_tta:
                             output += self.model(ch.flip(images, dims=[3]))
@@ -1647,7 +1697,7 @@ class ImageNetTrainer:
             self.model.module.make_clean()
         with ch.no_grad():
             with autocast(enabled=bool(mixed_precision)):
-                for images, target in tqdm(self.val_loader):
+                for images, target in tqdm(self.val_loader, disable=True):
                     if torch_loader:
                         images, target = images.cuda(), target.cuda()
                     output = self.model(images)

@@ -12,7 +12,7 @@ import torch.nn as nn
 from .simple_vit_decoupled import LayerNormDecoupled
 from .simple_vit_decoupled_v2 import SimpleViTDecoupledLayernorm_v2, SimpleViTDecoupled_Universal
 from .simple_vit_v2 import SimpleViT_v2
-from .simple_vit_v3 import SimpleViT_v3
+from .simple_vit_v3 import SimpleViT_v3, PyramidGenerator
 class BatchNormDecoupled(nn.Module):
     def __init__(self, bn):
         super().__init__()
@@ -36,7 +36,7 @@ class BatchNormDecoupled(nn.Module):
         self.clean = False
         self.factor = factor
 
-def get_arch(arch_name, num_classes, probe=False, split_layer=None):
+def get_arch(arch_name, num_classes=None, probe=False, split_layer=None):
     if arch_name in ('vit_t', 'vit_t_v2','vit_t_v3','vit_t_v4','vit_t_v5','vit_t_v6','vit_t_v7','vit_t_v8'):
         return SimpleViT_v3(
             image_size = 256,
@@ -55,6 +55,43 @@ def get_arch(arch_name, num_classes, probe=False, split_layer=None):
             num_classes = num_classes,
             dim = 384,
             depth = 12,
+            heads = 6,
+            mlp_dim = 384*4
+        )
+    elif arch_name in ('vit_s_generator',):
+        return PyramidGenerator(
+            image_size = 224,
+            patch_size = 16,
+            dim = 384,
+            depth = 1,
+            heads = 6,
+            mlp_dim = 384*4
+        )
+    elif arch_name in ('vit_s_generator_flat',):
+        return PyramidGenerator(
+            image_size = 224,
+            patch_size = 16,
+            dim = 384*2,
+            depth = 1,
+            heads = 6,
+            mlp_dim = 384*4
+        )
+    elif arch_name in ('vit_s_generator_deep',):
+        return PyramidGenerator(
+            image_size = 224,
+            patch_size = 16,
+            dim = 384,
+            depth = 2,
+            heads = 6,
+            mlp_dim = 384*4
+        )
+    
+    elif arch_name in ('vit_s_generator_deepflat',):
+        return PyramidGenerator(
+            image_size = 224,
+            patch_size = 16,
+            dim = 384*2,
+            depth = 2,
             heads = 6,
             mlp_dim = 384*4
         )

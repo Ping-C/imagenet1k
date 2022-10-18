@@ -299,6 +299,9 @@ class PyramidGenerator(nn.Module):
         x0 += torch.nn.functional.interpolate(x_32, x0.shape[2:])*20
         
         return x0
+    def flip_grad(self, factor=1):
+        for para in self.parameters():
+            para.grad *= -1 * factor
 if __name__ == "__main__":
     import pdb;pdb.set_trace()
     generator = PyramidGenerator(image_size=224, 
