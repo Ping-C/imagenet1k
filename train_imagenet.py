@@ -167,8 +167,12 @@ Section('adv', 'hyper parameter related to adversarial training').params(
     generator_grad_mult=Param(float, 'multiplier for generator gradient', default=1),
     optimizer=Param(str, 'optimizer used to optimizer the image'),
     lr=Param(float, 'optimizer used to optimizer the image'),
+    distill_subnet_advloss=Param(float, 'whether to use distill subnet loss', default=0),
+    adv_dropout_rate=Param(float, 'dropout rate for adv dropout', default=0),
 )
-
+Section('advdropout', 'hyperparameters associated with adversarial dropout').params(
+    parameterization=Param(str, 'how the adversarial dropout is parameterized: plain, all, ', default='plain')
+)
 Section('pyramid', 'hyperparameters associated with pyramid adversarial training').params(
     scale_factors=Param(str, 'scales or pyramid', default='32,16,1'),
     m_factors=Param(str, 'step multiplier', default='20,10,1'),
@@ -456,7 +460,7 @@ class ImageNetTrainer:
                 ckpt_path = resume_checkpoint
             if ckpt_path is not None:
                 print(f"loaded checkpoint at :{ckpt_path}")
-                checkpoint_dict = ch.load(ckpt_path)
+                checkpoint_dict = ch.load(ckpt_path, map_location='cpu')
                 if 'state_dict' in checkpoint_dict:
                     # load model, optimizer, starting epoch number
                     if convert:
@@ -1348,13 +1352,15 @@ class ImageNetTrainer:
     @param('adv.cache_class_wise_targeted')
     @param('adv.cache_class_wise_targeted_loss')
     @param('adv.generator_grad_mult')
+    @param('adv.distill_subnet_advloss')
     def train_loop(self, epoch, log_level, grad_clip_norm=None, num_steps=0, adv_loss_weight=0, radius=0, fixed_dropout=False, freeze_layers=None, split_backward=False, 
     freeze_nonlayernorm=False, adv_loss_even=False, mixed_precision=True, torch_loader=0, mixup=0, weight_decay_explicit=0, weight_decay=0, weight_decay_nolr=0, cache_class_wise_targeted=0,
-                  cache_class_wise_targeted_loss=None, generator_grad_mult=1): 
+                  cache_class_wise_targeted_loss=None, generator_grad_mult=1, distill_subnet_advloss=0): 
         model = self.model
         model.train()
         losses = []
         losses_adv = []
+        losses_clean = []
         train_stats = defaultdict(lambda : 0)
         n_samples = 0
         adv = num_steps > 0
@@ -1366,6 +1372,8 @@ class ImageNetTrainer:
 
         iterator = tqdm(self.train_loader, total=iters, disable=True)
         for ix, (images, target) in enumerate(iterator):
+            if ix == 1:
+                print("finished first batch...")
             if torch_loader:
                 images, target = images.cuda(non_blocking=True), target.cuda(non_blocking=True)
                 if mixup:
@@ -1412,17 +1420,17 @@ class ImageNetTrainer:
                 if adv_loss_weight != 1:
                     # only do clean training when adv_loss weight is not 1
                     output = self.model(images)
-                    loss_train = self.train_loss_func(output, target)
+                    loss_train_clean = self.train_loss_func(output, target)
                     if split_backward:
                         # add dummy loss from parameters
                         with self.model.no_sync():
                             dummy_loss = sum([para.sum()*0 for para in model.parameters()])
                             if adv_loss_even:
-                                self.scaler.scale(loss_train+dummy_loss).backward()
+                                self.scaler.scale(loss_train_clean+dummy_loss).backward()
                             else:
-                                self.scaler.scale(loss_train*(1-adv_loss_weight)+dummy_loss).backward()
+                                self.scaler.scale(loss_train_clean*(1-adv_loss_weight)+dummy_loss).backward()
                 else:
-                    loss_train = 0
+                    loss_train_clean = 0
                 if adv:
                     if hasattr(self.model.module, 'make_adv'):
                         self.model.module.make_adv()
@@ -1494,6 +1502,8 @@ class ImageNetTrainer:
                                     two_logits, 
                                     two_logits_label 
                                 )
+                    elif distill_subnet_advloss:
+                        loss_train_adv = ch.nn.CrossEntropyLoss()(output_adv, ch.nn.Softmax(dim=1)(output.detach()))
                     else:
                         loss_train_adv = self.train_adv_loss_func(output_adv, target)
                     
@@ -1506,11 +1516,13 @@ class ImageNetTrainer:
                             self.scaler.scale(loss_train_adv*(adv_loss_weight)+dummy_loss).backward()
                         if hasattr(self, 'generator'):
                             self.generator.module.flip_grad(factor=generator_grad_mult)
+                        if hasattr(self.model.module, 'flip_grad'):
+                            self.model.module.flip_grad()
                     else:
                         if adv_loss_even:
-                            loss_train = loss_train_adv + loss_train + dummy_loss
+                            loss_train = loss_train_adv + loss_train_clean + dummy_loss
                         else:
-                            loss_train = loss_train_adv * adv_loss_weight + loss_train * (1-adv_loss_weight) + dummy_loss
+                            loss_train = loss_train_adv * adv_loss_weight + loss_train_clean * (1-adv_loss_weight) + dummy_loss
                     
                     # calculate adversarial metric
                     # needs to calculate this separately for mix up training
@@ -1538,6 +1550,8 @@ class ImageNetTrainer:
                 self.scaler.scale(loss_train).backward()
                 if hasattr(self, 'generator'):
                     self.generator.module.flip_grad(factor=generator_grad_mult)
+                if hasattr(self.model.module, 'flip_grad'):
+                    self.model.module.flip_grad()
             # Unscales the gradients of optimizer's assigned params in-place
             self.scaler.unscale_(self.optimizer)
             if hasattr(self, 'adv_cache_noise'):
@@ -1575,6 +1589,7 @@ class ImageNetTrainer:
             if log_level > 0:
                 losses.append(loss_train.detach())
                 losses_adv.append(loss_train_adv.detach())
+                losses_clean.append(loss_train_clean.detach())
                 group_lrs = []
                 for _, group in enumerate(self.optimizer.param_groups):
                     group_lrs.append(f'{group["lr"]:.3f}')
@@ -1607,6 +1622,7 @@ class ImageNetTrainer:
 
         train_stats["train_loss"] = (sum(losses)/len(losses)).item()
         train_stats["train_loss_adv"] = (sum(losses_adv)/len(losses_adv)).item()
+        train_stats["train_loss_clean"] = (sum(losses_clean)/len(losses_clean)).item()
         train_stats["epoch"] = epoch
         return train_stats
 
@@ -1693,7 +1709,7 @@ class ImageNetTrainer:
 
             stats = {f"{k}_greedy": m.compute().item() for k, m in self.val_meters.items()} | stats
             [meter.reset() for meter in self.val_meters.values()]
-        if isinstance(self.model.module, SimpleViTDecoupledLN) or isinstance(self.model.module, MViTDecoupled) :
+        if hasattr(self.model.module, 'make_clean'):
             self.model.module.make_clean()
         with ch.no_grad():
             with autocast(enabled=bool(mixed_precision)):
