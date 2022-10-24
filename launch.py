@@ -47,6 +47,7 @@ def readlogfiles(job):
     # loop through all log files, and make sure that the error logs
     NCCL_ERR_MSG = "ncclSystemError: System call (socket, malloc, munmap, etc) failed."
     UNEXPECTED_ERR_MSG = "Encountering unexpected failure:"
+    UNEXPECTED_ERR_MSG2 = "free(): double free detected in"
     statuses = [None]*len(job._tasks)
     for i, task_num in enumerate(job._tasks):
         # check whether the error log exists
@@ -58,7 +59,7 @@ def readlogfiles(job):
             f.close()
             
             for line in lines:
-                if NCCL_ERR_MSG in line or UNEXPECTED_ERR_MSG in line:
+                if NCCL_ERR_MSG in line or UNEXPECTED_ERR_MSG in line or UNEXPECTED_ERR_MSG2 in line:
                     statuses[i] = "NCCL_ERR"
                     break
                 if "iter=1" in line:
@@ -68,11 +69,14 @@ def readlogfiles(job):
             
             # open the error log
 def getnodefromtask(task):
-    lines = task.stdout().split("\n")
-    for line in lines:
-        if "I'm on node #" in line:
-            nodename = line.replace("    I'm on node #", "")
-            return nodename
+    try:
+        lines = task.stdout().split("\n")
+        for line in lines:
+            if "I'm on node #" in line:
+                nodename = line.replace("    I'm on node #", "")
+                return nodename
+    except Exception as e:
+        pass
     return ""
 class SlurmExecutorMod(submitit.SlurmExecutor):
     def _num_tasks(self) -> int:
@@ -130,7 +134,8 @@ while requeue and requeue_unknown_count < requeue_limit:
             print("encountering nccl_err, cancel job and restart")
             job.cancel()
             # ensure that the state has changed
-            while "CANCELLED" not in job.state:
+            while "CANCELLED" not in job.state and "COMPLETED" not in job.state:
+                print("trying to cancel job", job.state)
                 time.sleep(10)
             
             break

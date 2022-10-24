@@ -13,6 +13,8 @@ from .simple_vit_decoupled import LayerNormDecoupled
 from .simple_vit_decoupled_v2 import SimpleViTDecoupledLayernorm_v2, SimpleViTDecoupled_Universal
 from .simple_vit_v2 import SimpleViT_v2
 from .simple_vit_v3 import SimpleViT_v3, PyramidGenerator
+from .simple_vit_advdropout import SimpleViTAdvDropout
+from .simple_vit_subnet import SimpleViTSubnet
 class BatchNormDecoupled(nn.Module):
     def __init__(self, bn):
         super().__init__()
@@ -50,6 +52,26 @@ def get_arch(arch_name, num_classes=None, probe=False, split_layer=None):
         )
     elif arch_name in ('vit_s', 'vit_s_v2','vit_s_v3','vit_s_v4','vit_s_v5','vit_s_v6','vit_s_v7','vit_s_v8'):
         return SimpleViT_v3(
+            image_size = 224,
+            patch_size = 16,
+            num_classes = num_classes,
+            dim = 384,
+            depth = 12,
+            heads = 6,
+            mlp_dim = 384*4
+        )
+    elif arch_name == 'vit_s_advdropout':
+        return SimpleViTAdvDropout(
+            image_size = 224,
+            patch_size = 16,
+            num_classes = num_classes,
+            dim = 384,
+            depth = 12,
+            heads = 6,
+            mlp_dim = 384*4
+        )
+    elif arch_name == 'vit_s_subnet':
+        return SimpleViTSubnet(
             image_size = 224,
             patch_size = 16,
             num_classes = num_classes,
